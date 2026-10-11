@@ -416,7 +416,9 @@ extension TransferDetail {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(T.orange)
                     Text(t.interruptedBy).font(.system(size: 15, weight: .semibold)).foregroundStyle(T.label)
                 }
-                Text("\(Fmt.bytes(copied)) of \(Fmt.bytes(t.totalBytes)) was copied before it stopped. Nothing copied so far is lost, and nothing carries on until you choose.")
+                Text(copied > 0
+                     ? "\(Fmt.bytes(copied)) of \(Fmt.bytes(t.totalBytes)) was copied before it stopped. Nothing copied so far is lost, and nothing carries on until you choose."
+                     : "Anything already on the destinations is checked before it's trusted, and the rest is copied. Nothing carries on until you choose.")
                     .font(.system(size: 12.5)).foregroundStyle(T.label2)
                 if let w = t.waitingFor {
                     Text("Plug \(w) back in to continue.")

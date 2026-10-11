@@ -189,7 +189,7 @@ final class AppModel: ObservableObject {
     private var timer: Timer?
     private var activity: NSObjectProtocol?
     private var reserved: [String: Set<String>] = [:]   // parent path → names being created right now
-    private var saveCountdown = 80
+    private var saveCountdown = 20
 
     init() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -227,7 +227,7 @@ final class AppModel: ObservableObject {
         NSApp.dockTile.badgeLabel = active.isEmpty && interrupted.isEmpty ? nil : "\(active.count + queued.count + interrupted.count)"
         saveCountdown -= 1
         if saveCountdown <= 0 {
-            saveCountdown = 40   // every 10 s
+            saveCountdown = 20   // every 5 s
             for t in active where t.state != .report { Journal.save(t) }
         }
     }
