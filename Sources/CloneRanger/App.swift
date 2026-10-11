@@ -119,6 +119,10 @@ struct SettingsView: View {
             Text("One at a time is usually fastest: transfers that share a drive slow each other down.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Also save a CSV checksum list next to each PDF report", isOn: $model.saveCSV)
+            Picker("Clip frames in the report", selection: $model.largeReportFrames) {
+                Text("Compact: two columns, small frames").tag(false)
+                Text("Large: three across").tag(true)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)

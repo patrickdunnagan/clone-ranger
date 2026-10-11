@@ -184,6 +184,7 @@ final class AppModel: ObservableObject {
     @Published var notice: String?
     @AppStorage("transfersAtOnce") var transfersAtOnce = 1
     @AppStorage("saveCSV") var saveCSV = false
+    @AppStorage("largeReportFrames") var largeReportFrames = false
 
     static let maxDestinations = 4
     private var timer: Timer?
@@ -387,8 +388,8 @@ final class AppModel: ObservableObject {
         t.state = .report
         t.stageChanged()
         let data = ReportData(t)
-        let csv = saveCSV
-        let (reports, problem) = await Task.detached { await ReportWriter.writeAll(data, csv: csv) }.value
+        let csv = saveCSV, compact = !largeReportFrames && ProcessInfo.processInfo.environment["CR_LARGE_FRAMES"] == nil
+        let (reports, problem) = await Task.detached { await ReportWriter.writeAll(data, csv: csv, compactClips: compact) }.value
         t.reports = reports
         t.reportProblem = problem
         t.finished = Date()

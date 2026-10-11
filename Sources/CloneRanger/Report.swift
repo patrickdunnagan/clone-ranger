@@ -53,7 +53,7 @@ enum ReportWriter {
     }
 
     /// Grabs the clip frames once, then writes the same report into every destination.
-    static func writeAll(_ d: ReportData, csv: Bool) async -> ([URL?], String?) {
+    static func writeAll(_ d: ReportData, csv: Bool, compactClips: Bool = true) async -> ([URL?], String?) {
         let o = d.outcome
         let clips = o.results.filter { $0.item.kind == .file && FrameGrab.isClip($0.item.path) && $0.hash != nil }
         var stills: [String: FrameGrab.Still] = [:]
@@ -75,7 +75,7 @@ enum ReportWriter {
             let path = reportPath(target: target, date: now, ext: "pdf")
             do {
                 try FS.makeFolders((path as NSString).deletingLastPathComponent)
-                try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path))
+                try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path), compactClips: compactClips)
                 if csv { try writeCSV(d, to: exactURL(String(path.dropLast(4)) + ".csv")) }
                 urls.append(exactURL(path))
             } catch {
@@ -99,7 +99,8 @@ enum ReportWriter {
 
     // MARK: PDF
 
-    static func writePDF(_ d: ReportData, stills: [String: FrameGrab.Still], thisDestination: Int, date: Date, to url: URL) throws {
+    static func writePDF(_ d: ReportData, stills: [String: FrameGrab.Still], thisDestination: Int, date: Date, to url: URL,
+                         compactClips: Bool = true) throws {
         let pdf = PDFBuilder(url: url, footer: "Clone Ranger \(appVersion) · \(d.sourceName)")
         guard let pdf else { throw CocoaError(.fileWriteUnknown) }
         let o = d.outcome
@@ -225,26 +226,72 @@ enum ReportWriter {
             }
         }
 
-        // Clips with a frame each; long clips get two (near the start and the middle) in a double-wide tile.
+        // Clips. Compact (default): two columns of small frames with the details beside them. Large: a grid of
+        // three big frames. Either way clips over 30 s get two frames (near the start and the middle).
         let clips = files.filter { $0.item.kind == .file && FrameGrab.isClip($0.item.path) }
             .sorted { $0.item.path.localizedStandardCompare($1.item.path) == .orderedAscending }
-        if !clips.isEmpty {
+        func drawFrame(_ img: CGImage?, x: CGFloat, y: CGFloat, w tw: CGFloat, h th: CGFloat, ext: String) {
+            pdf.box(x: x, y: y, w: tw, h: th, color: CGColor(gray: 0.12, alpha: 1))
+            if let img {
+                let iw = CGFloat(img.width), ih = CGFloat(img.height)
+                let scale = min(tw / iw, th / ih)
+                pdf.image(img, x: x + (tw - iw * scale) / 2, y: y + (th - ih * scale) / 2, w: iw * scale, h: ih * scale)
+            } else {
+                let raw = FrameGrab.rawExtensions.contains(ext) && !FrameGrab.canPreview(ext)
+                pdf.text(raw ? "RAW · no preview" : "No preview", x: x, y: y + th / 2 - 4, size: tw < 120 ? 6.5 : 8,
+                         color: CGColor(gray: 0.7, alpha: 1), width: tw, center: true)
+            }
+        }
+        func timeTag(_ text: String, x: CGFloat, y: CGFloat, w: CGFloat, small: Bool) {
+            let bw: CGFloat = small ? 48 : 62, bh: CGFloat = small ? 9 : 11
+            pdf.box(x: x + 3, y: y - bh - 3, w: bw, h: bh, color: CGColor(gray: 0, alpha: 0.6))
+            pdf.text(text, x: x + 3, y: y - bh - 2, size: small ? 5.5 : 6.5, color: CGColor(gray: 1, alpha: 1), width: bw, center: true)
+        }
+        func meta(_ r: ItemResult, _ s: FrameGrab.Still?) -> String {
+            [s?.duration.map { Fmt.timecode($0) }, s?.dimensions, Fmt.bytes(r.item.size)].compactMap { $0 }.joined(separator: " · ")
+        }
+        if !clips.isEmpty && compactClips {
+            pdf.y += 8
+            pdf.heading("Clips (\(clips.count))", color: ink)
+            let colGap: CGFloat = 18, cw = (W - colGap) / 2
+            let tw: CGFloat = 100, th = tw * 9 / 16, pairGap: CGFloat = 4, textGap: CGFloat = 8
+            func height(_ r: ItemResult) -> CGFloat { stills[r.item.path]?.middle != nil ? th + 36 : max(th, 36) }
+            for i in stride(from: 0, to: clips.count, by: 2) {
+                let row = Array(clips[i..<min(i + 2, clips.count)])
+                let rowH = row.map(height).max() ?? th
+                pdf.ensure(rowH + 4)
+                for (c, r) in row.enumerated() {
+                    let x = X + CGFloat(c) * (cw + colGap), y = pdf.y
+                    let s = stills[r.item.path]
+                    let ext = (r.item.path as NSString).pathExtension.lowercased()
+                    let ok = !r.errors.contains { $0 != nil }
+                    let name = (ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent
+                    drawFrame(s?.image, x: x, y: y, w: tw, h: th, ext: ext)
+                    if s?.middle != nil {
+                        // Two frames side by side, details underneath.
+                        drawFrame(s?.middle, x: x + tw + pairGap, y: y, w: tw, h: th, ext: ext)
+                        for (n, t) in (s?.times ?? []).prefix(2).enumerated() {
+                            timeTag((n == 0 ? "Start " : "Middle ") + Fmt.timecode(t), x: x + CGFloat(n) * (tw + pairGap), y: y + th, w: tw, small: true)
+                        }
+                        pdf.text(name, x: x, y: y + th + 4, size: 8, weight: .semibold, color: ok ? ink : red, width: cw)
+                        pdf.text(meta(r, s), x: x, y: y + th + 15, size: 7, color: gray, width: cw)
+                        pdf.text(r.hash ?? "", x: x, y: y + th + 25, size: 6.5, color: gray, width: cw, mono: true)
+                    } else {
+                        // One frame, details beside it.
+                        let tx = x + tw + textGap, w = cw - tw - textGap
+                        pdf.text(name, x: tx, y: y + 2, size: 8, weight: .semibold, color: ok ? ink : red, width: w)
+                        pdf.text(meta(r, s), x: tx, y: y + 14, size: 7, color: gray, width: w)
+                        pdf.text(r.hash ?? "", x: tx, y: y + 25, size: 6.5, color: gray, width: w, mono: true)
+                    }
+                }
+                pdf.y += rowH + 10
+            }
+        } else if !clips.isEmpty {
             pdf.y += 8
             pdf.heading("Clips (\(clips.count))", color: ink)
             let cols = 3, gap: CGFloat = 12
             let tw = (W - gap * CGFloat(cols - 1)) / CGFloat(cols), th = tw * 9 / 16, tile = th + 44
             var col = 0
-            func drawFrame(_ img: CGImage?, x: CGFloat, ext: String) {
-                pdf.box(x: x, y: pdf.y, w: tw, h: th, color: CGColor(gray: 0.12, alpha: 1))
-                if let img {
-                    let iw = CGFloat(img.width), ih = CGFloat(img.height)
-                    let scale = min(tw / iw, th / ih)
-                    pdf.image(img, x: x + (tw - iw * scale) / 2, y: pdf.y + (th - ih * scale) / 2, w: iw * scale, h: ih * scale)
-                } else {
-                    let raw = FrameGrab.rawExtensions.contains(ext) && !FrameGrab.canPreview(ext)
-                    pdf.text(raw ? "RAW · no preview yet" : "No preview", x: x, y: pdf.y + th / 2 - 5, size: 8, color: CGColor(gray: 0.7, alpha: 1), width: tw, center: true)
-                }
-            }
             for r in clips {
                 let s = stills[r.item.path]
                 let span = s?.middle != nil ? 2 : 1
@@ -253,20 +300,16 @@ enum ReportWriter {
                 let x = X + CGFloat(col) * (tw + gap)
                 let w = CGFloat(span) * tw + CGFloat(span - 1) * gap
                 let ext = (r.item.path as NSString).pathExtension.lowercased()
-                drawFrame(s?.image, x: x, ext: ext)
+                drawFrame(s?.image, x: x, y: pdf.y, w: tw, h: th, ext: ext)
                 if span == 2 {
-                    drawFrame(s?.middle, x: x + tw + gap, ext: ext)
-                    // Where each frame is from, on the frame's bottom edge.
+                    drawFrame(s?.middle, x: x + tw + gap, y: pdf.y, w: tw, h: th, ext: ext)
                     for (i, t) in (s?.times ?? []).prefix(2).enumerated() {
-                        let fx = x + CGFloat(i) * (tw + gap)
-                        pdf.box(x: fx + 4, y: pdf.y + th - 15, w: 62, h: 11, color: CGColor(gray: 0, alpha: 0.6))
-                        pdf.text((i == 0 ? "Start " : "Middle ") + Fmt.timecode(t), x: fx + 4, y: pdf.y + th - 14, size: 6.5, color: CGColor(gray: 1, alpha: 1), width: 62, center: true)
+                        timeTag((i == 0 ? "Start " : "Middle ") + Fmt.timecode(t), x: x + CGFloat(i) * (tw + gap), y: pdf.y + th, w: tw, small: false)
                     }
                 }
                 let ok = !r.errors.contains { $0 != nil }
                 pdf.text((ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent, x: x, y: pdf.y + th + 4, size: 8, weight: .semibold, color: ok ? ink : red, width: w)
-                let meta = [s?.duration.map { Fmt.timecode($0) }, s?.dimensions, Fmt.bytes(r.item.size)].compactMap { $0 }.joined(separator: " · ")
-                pdf.text(meta, x: x, y: pdf.y + th + 15, size: 7.5, color: gray, width: w)
+                pdf.text(meta(r, s), x: x, y: pdf.y + th + 15, size: 7.5, color: gray, width: w)
                 pdf.text(r.hash ?? "", x: x, y: pdf.y + th + 25, size: 7, color: gray, width: w, mono: true)
                 col += span
                 if col >= cols { pdf.y += tile; col = 0 }
