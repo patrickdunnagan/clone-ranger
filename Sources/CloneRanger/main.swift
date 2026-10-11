@@ -23,7 +23,9 @@ if let dir = ProcessInfo.processInfo.environment["CR_TEST_FRAMES"] {
             let t0 = Date()
             let s = await FrameGrab.still(for: root.appendingPathComponent(item.path))
             let name = item.path.replacingOccurrences(of: "/", with: "_")
-            print(String(format: "%@  %@  %@  %.1fs", item.path, s.image == nil ? "NO FRAME" : "frame", s.dimensions ?? "-", Date().timeIntervalSince(t0)))
+            print(String(format: "%@  %@  %@  dur %.1f  frames at %@  %.1fs", item.path, s.image == nil ? "NO FRAME" : (s.middle == nil ? "1 frame" : "2 frames"),
+                         s.dimensions ?? "-", s.duration ?? 0, s.times.map { String(format: "%.1f", $0) }.joined(separator: ","), Date().timeIntervalSince(t0)))
+            if let m = s.middle { try? NSBitmapImageRep(cgImage: m).representation(using: .jpeg, properties: [:])?.write(to: out.appendingPathComponent(name + " middle.jpg")) }
             if let img = s.image { try? NSBitmapImageRep(cgImage: img).representation(using: .jpeg, properties: [:])?.write(to: out.appendingPathComponent(name + ".jpg")) }
         }
         done.signal()

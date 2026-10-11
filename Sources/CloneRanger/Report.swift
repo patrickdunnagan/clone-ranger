@@ -225,7 +225,7 @@ enum ReportWriter {
             }
         }
 
-        // Clips with a frame each.
+        // Clips with a frame each; long clips get two (near the start and the middle) in a double-wide tile.
         let clips = files.filter { $0.item.kind == .file && FrameGrab.isClip($0.item.path) }
             .sorted { $0.item.path.localizedStandardCompare($1.item.path) == .orderedAscending }
         if !clips.isEmpty {
@@ -233,28 +233,70 @@ enum ReportWriter {
             pdf.heading("Clips (\(clips.count))", color: ink)
             let cols = 3, gap: CGFloat = 12
             let tw = (W - gap * CGFloat(cols - 1)) / CGFloat(cols), th = tw * 9 / 16, tile = th + 44
-            for (n, r) in clips.enumerated() {
-                let col = n % cols
-                if col == 0 { pdf.ensure(tile); if n > 0 { pdf.y += 0 } }
-                let x = X + CGFloat(col) * (tw + gap)
-                let s = stills[r.item.path]
+            var col = 0
+            func drawFrame(_ img: CGImage?, x: CGFloat, ext: String) {
                 pdf.box(x: x, y: pdf.y, w: tw, h: th, color: CGColor(gray: 0.12, alpha: 1))
-                if let img = s?.image {
+                if let img {
                     let iw = CGFloat(img.width), ih = CGFloat(img.height)
                     let scale = min(tw / iw, th / ih)
                     pdf.image(img, x: x + (tw - iw * scale) / 2, y: pdf.y + (th - ih * scale) / 2, w: iw * scale, h: ih * scale)
                 } else {
-                    let ext = (r.item.path as NSString).pathExtension.lowercased()
                     let raw = FrameGrab.rawExtensions.contains(ext) && !FrameGrab.canPreview(ext)
                     pdf.text(raw ? "RAW · no preview yet" : "No preview", x: x, y: pdf.y + th / 2 - 5, size: 8, color: CGColor(gray: 0.7, alpha: 1), width: tw, center: true)
                 }
-                let ok = !r.errors.contains { $0 != nil }
-                pdf.text((ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent, x: x, y: pdf.y + th + 4, size: 8, weight: .semibold, color: ok ? ink : red, width: tw)
-                let meta = [s?.duration.map { Fmt.timecode($0) }, s?.dimensions, Fmt.bytes(r.item.size)].compactMap { $0 }.joined(separator: " · ")
-                pdf.text(meta, x: x, y: pdf.y + th + 15, size: 7.5, color: gray, width: tw)
-                pdf.text(r.hash ?? "", x: x, y: pdf.y + th + 25, size: 7, color: gray, width: tw, mono: true)
-                if col == cols - 1 || n == clips.count - 1 { pdf.y += tile }
             }
+            for r in clips {
+                let s = stills[r.item.path]
+                let span = s?.middle != nil ? 2 : 1
+                if col + span > cols { pdf.y += tile; col = 0 }
+                if col == 0 { pdf.ensure(tile) }
+                let x = X + CGFloat(col) * (tw + gap)
+                let w = CGFloat(span) * tw + CGFloat(span - 1) * gap
+                let ext = (r.item.path as NSString).pathExtension.lowercased()
+                drawFrame(s?.image, x: x, ext: ext)
+                if span == 2 {
+                    drawFrame(s?.middle, x: x + tw + gap, ext: ext)
+                    // Where each frame is from, on the frame's bottom edge.
+                    for (i, t) in (s?.times ?? []).prefix(2).enumerated() {
+                        let fx = x + CGFloat(i) * (tw + gap)
+                        pdf.box(x: fx + 4, y: pdf.y + th - 15, w: 62, h: 11, color: CGColor(gray: 0, alpha: 0.6))
+                        pdf.text((i == 0 ? "Start " : "Middle ") + Fmt.timecode(t), x: fx + 4, y: pdf.y + th - 14, size: 6.5, color: CGColor(gray: 1, alpha: 1), width: 62, center: true)
+                    }
+                }
+                let ok = !r.errors.contains { $0 != nil }
+                pdf.text((ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent, x: x, y: pdf.y + th + 4, size: 8, weight: .semibold, color: ok ? ink : red, width: w)
+                let meta = [s?.duration.map { Fmt.timecode($0) }, s?.dimensions, Fmt.bytes(r.item.size)].compactMap { $0 }.joined(separator: " · ")
+                pdf.text(meta, x: x, y: pdf.y + th + 15, size: 7.5, color: gray, width: w)
+                pdf.text(r.hash ?? "", x: x, y: pdf.y + th + 25, size: 7, color: gray, width: w, mono: true)
+                col += span
+                if col >= cols { pdf.y += tile; col = 0 }
+            }
+            if col > 0 { pdf.y += tile }
+        }
+
+        // Where everything went: per destination, each file and the folder it landed in.
+        pdf.y += 8
+        pdf.ensure(90)
+        pdf.heading("Where everything went", color: ink)
+        for (d, t) in d.targets.enumerated() {
+            pdf.ensure(40)
+            let problem = d < o.destinationProblems.count ? o.destinationProblems[d] : nil
+            pdf.text((d == thisDestination ? "▸ " : "") + volumeName(ofTarget: t), x: X, y: pdf.y, size: 9.5, weight: .semibold, color: ink)
+            pdf.y += 12
+            pdf.y += pdf.wrapped(problem.map { "Not used: \($0)" } ?? t, x: X, y: pdf.y, width: W, size: 7.5, color: problem == nil ? gray : red, mono: problem == nil) + 4
+            if problem != nil { continue }
+            pdf.text("File", x: X, y: pdf.y, size: 7, weight: .semibold, color: gray)
+            pdf.text("Folder on \(volumeName(ofTarget: t))", x: X + 170, y: pdf.y, size: 7, weight: .semibold, color: gray)
+            pdf.y += 10
+            for r in files.sorted(by: { $0.item.path.localizedStandardCompare($1.item.path) == .orderedAscending }) {
+                pdf.ensure(10)
+                let ok = r.errors[d] == nil
+                let folder = (FS.join(t, r.item.path) as NSString).deletingLastPathComponent
+                pdf.text((ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent, x: X, y: pdf.y, size: 7, color: ok ? ink : red, width: 165)
+                pdf.text(ok ? folder : "Not here: \(r.errors[d]!)", x: X + 170, y: pdf.y, size: 7, color: ok ? ink : red, width: W - 170, mono: ok, truncateMiddle: true)
+                pdf.y += 9.5
+            }
+            pdf.y += 8
         }
 
         // Every file with its checksum.

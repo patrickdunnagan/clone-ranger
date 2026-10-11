@@ -33,11 +33,11 @@ enum FrameGrab {
         videoExtensions.contains(ext) || (ext == "braw" && brawLibDir != nil) || (ext == "r3d" && r3dLibDir != nil)
     }
 
-    static func r3dStill(_ path: String) -> Still {
+    static func r3dStill(_ path: String, at fraction: Double = 0.1) -> Still {
         var out = Still()
         guard let lib = r3dLibDir else { return out }
         var s = R3DStill()
-        if r3d_grab(lib, path, 0.1, 480, &s) == 1, let px = s.bgra {
+        if r3d_grab(lib, path, fraction, 480, &s) == 1, let px = s.bgra {
             defer { r3d_free(&s) }
             let w = Int(s.width), h = Int(s.height)
             let data = Data(bytes: px, count: w * h * 4)
@@ -53,11 +53,11 @@ enum FrameGrab {
         return out
     }
 
-    static func brawStill(_ path: String) -> Still {
+    static func brawStill(_ path: String, at fraction: Double = 0.1) -> Still {
         var out = Still()
         guard let lib = brawLibDir else { return out }
         var s = BRAWStill()
-        if braw_grab(lib, path, 0.1, 480, &s) == 1, let px = s.rgba {
+        if braw_grab(lib, path, fraction, 480, &s) == 1, let px = s.rgba {
             defer { braw_free(&s) }
             let w = Int(s.width), h = Int(s.height)
             let data = Data(bytes: px, count: w * h * 4)
@@ -79,12 +79,34 @@ enum FrameGrab {
     }
 
     struct Still: @unchecked Sendable {
-        var image: CGImage?
+        var image: CGImage?                   // the only frame, or the one near the start
+        var middle: CGImage?                  // clips longer than `twoFrameLength`: the middle frame
+        var times: [Double] = []              // seconds into the clip of each frame shown
         var duration: Double?
         var dimensions: String?
     }
 
-    /// Frame about a tenth of the way in (past any slate or black). Falls back to the
+    /// Clips longer than this get two frames: near the start and the middle.
+    static let twoFrameLength: Double = 30
+    /// "Near the start": far enough in to miss black frames and slates.
+    static let startOffset: Double = 2
+
+    /// RAW clips: one decode to learn the length, then the start and middle frames if it's long.
+    static func rawStill(_ path: String, braw: Bool) -> Still {
+        let grab = { (f: Double) in braw ? brawStill(path, at: f) : r3dStill(path, at: f) }
+        var out = grab(0.1)
+        guard let d = out.duration, d > 0 else { return out }
+        out.times = [d * 0.1]
+        if d > twoFrameLength {
+            let start = grab(startOffset / d), mid = grab(0.5)
+            if start.image != nil { out.image = start.image; out.times = [startOffset] }
+            if mid.image != nil { out.middle = mid.image; out.times.append(d / 2) }
+        }
+        return out
+    }
+
+    /// Frame about a tenth of the way in (past any slate or black); for clips over 30 s, one ~2 s in
+    /// and one at the middle. Falls back to the
     /// thumbnail Sony cameras write next to each clip (THMBNL / Thmbnl folders).
     static func still(for url: URL) async -> Still {
         var out = Still()
@@ -92,7 +114,7 @@ enum FrameGrab {
         if e == "braw" || e == "r3d" {
             // Decoding is blocking C++; give it a worker thread and the same 20 s limit as video.
             return await withTaskGroup(of: Still?.self) { group in
-                group.addTask { await Task.detached { e == "braw" ? brawStill(url.path) : r3dStill(url.path) }.value }
+                group.addTask { await Task.detached { rawStill(url.path, braw: e == "braw") }.value }
                 group.addTask { try? await Task.sleep(for: .seconds(20)); return nil }
                 let first = await group.next() ?? nil
                 group.cancelAll()
@@ -111,16 +133,28 @@ enum FrameGrab {
             gen.maximumSize = CGSize(width: 480, height: 270)
             gen.requestedTimeToleranceBefore = CMTime(seconds: 2, preferredTimescale: 600)
             gen.requestedTimeToleranceAfter = CMTime(seconds: 2, preferredTimescale: 600)
-            let t = CMTime(seconds: min(10, (out.duration ?? 1) * 0.1), preferredTimescale: 600)
-            out.image = await withTaskGroup(of: CGImage?.self) { group in
-                group.addTask { try? await gen.image(at: t).image }
-                group.addTask { try? await Task.sleep(for: .seconds(20)); return nil }
-                let first = await group.next() ?? nil
-                group.cancelAll()
-                return first
+            func frame(_ seconds: Double) async -> CGImage? {
+                let t = CMTime(seconds: seconds, preferredTimescale: 600)
+                return await withTaskGroup(of: CGImage?.self) { group in
+                    group.addTask { try? await gen.image(at: t).image }
+                    group.addTask { try? await Task.sleep(for: .seconds(20)); return nil }
+                    let first = await group.next() ?? nil
+                    group.cancelAll()
+                    return first
+                }
+            }
+            let d = out.duration ?? 1
+            if d > twoFrameLength {
+                out.image = await frame(startOffset)
+                out.middle = await frame(d / 2)
+                out.times = [startOffset, d / 2]
+            } else {
+                let t = min(10, d * 0.1)
+                out.image = await frame(t)
+                out.times = [t]
             }
         }
-        if out.image == nil { out.image = sonyThumbnail(for: url) }
+        if out.image == nil { out.image = sonyThumbnail(for: url); out.middle = nil; out.times = [] }
         return out
     }
 
