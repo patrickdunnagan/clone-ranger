@@ -1,0 +1,440 @@
+import AppKit
+import CRCore
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// Reads dropped Finder items as file URLs.
+func dropped(_ providers: [NSItemProvider], _ handle: @escaping @MainActor (URL) -> Void) -> Bool {
+    for p in providers where p.canLoadObject(ofClass: URL.self) {
+        _ = p.loadObject(ofClass: URL.self) { url, _ in
+            if let url { Task { @MainActor in handle(url) } }
+        }
+    }
+    return true
+}
+
+struct CenterColumn: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            topBar
+            if let n = model.notice {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(T.amber)
+                    Text(n).font(.system(size: 12.5)).foregroundStyle(T.label)
+                    Spacer()
+                    Button { model.notice = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).foregroundStyle(T.label3)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: T.radius).fill(T.amber.opacity(0.14)))
+            }
+            if let t = model.selectedTransfer {
+                TransferDetail(t: t)
+            } else {
+                Composer()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(T.bg)
+    }
+
+    /// One button at the top: start (or queue) what's been dropped below, or open a fresh drop area.
+    @ViewBuilder private var topBar: some View {
+        HStack(spacing: 10) {
+            if model.selectedTransfer == nil {
+                Button {
+                    model.commit()
+                } label: {
+                    Label(model.busy ? "Add to Queue" : "Start Transfer", systemImage: model.busy ? "text.badge.plus" : "play.fill")
+                }
+                .buttonStyle(PrimaryButtonStyle(large: true))
+                .disabled(!model.draftReady)
+                .keyboardShortcut(.return, modifiers: .command)
+                Text(hint)
+                    .font(.system(size: 12))
+                    .foregroundStyle(T.label3)
+            } else {
+                Button {
+                    model.selected = nil
+                } label: {
+                    Label(model.busy ? "Queue Next" : "Start a Transfer", systemImage: "plus")
+                }
+                .buttonStyle(PrimaryButtonStyle(large: true))
+                .keyboardShortcut("n", modifiers: .command)
+                if model.busy {
+                    Text("A transfer is running · new ones wait in line")
+                        .font(.system(size: 12))
+                        .foregroundStyle(T.label3)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private var hint: String {
+        if model.draftSource == nil { return "Drop a card or folder below to copy from" }
+        if model.draftDests.isEmpty { return "Now drop where it should go" }
+        if model.draftScanning { return "Counting files…" }
+        if !model.draftReady { return "Fix the destination marked in red" }
+        return model.busy ? "Waits until the current transfer is done" : "Ready"
+    }
+}
+
+// MARK: - New transfer: source on top, destinations underneath
+
+struct Composer: View {
+    @EnvironmentObject var model: AppModel
+    @State private var sourceHover = false
+    @State private var destHover = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            source
+                .frame(maxHeight: model.draftSource == nil ? 210 : nil)
+                .fixedSize(horizontal: false, vertical: model.draftSource != nil)
+            destinations
+                .frame(maxHeight: .infinity, alignment: .top)
+        }
+    }
+
+    @ViewBuilder private var source: some View {
+        Group {
+            if let src = model.draftSource {
+                Card {
+                    HStack {
+                        SectionLabel(text: "Transfer from")
+                        Spacer()
+                        Button { model.clearDraft() } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(T.label3).help("Clear")
+                    }
+                    HStack(spacing: 12) {
+                        Image(systemName: "sdcard").font(.system(size: 26)).foregroundStyle(T.amber)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(Plan.sourceName(src)).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                            Text(src.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
+                                .lineLimit(1).truncationMode(.middle)
+                            if let s = model.draftScan {
+                                Text("\(Fmt.count(s.files, "file")) · \(Fmt.bytes(s.bytes))" + (s.problems.isEmpty ? "" : " · \(s.problems.count) folders couldn't be read"))
+                                    .font(.system(size: 12.5)).foregroundStyle(s.problems.isEmpty ? T.label2 : T.red)
+                            } else {
+                                Text("Counting files…").font(.system(size: 12.5)).foregroundStyle(T.label3)
+                            }
+                        }
+                    }
+                    Text("Drop another folder here to swap it.")
+                        .font(.system(size: 11)).foregroundStyle(T.label3)
+                }
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(T.blue, lineWidth: sourceHover ? 2 : 0))
+            } else {
+                Ghost(icon: "sdcard", title: "Drop the card or folder to copy from",
+                      detail: "Everything inside is recreated exactly, folders and all.",
+                      hover: sourceHover, button: "Choose…") { model.chooseSource() }
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $sourceHover) { dropped(Array($0.prefix(1))) { model.setSource($0) } }
+    }
+
+    @ViewBuilder private var destinations: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !model.draftDests.isEmpty {
+                Card {
+                    SectionLabel(text: "Transfer to · \(model.draftDests.count) of \(AppModel.maxDestinations), all copied at once")
+                    ForEach(Array(model.draftDests.enumerated()), id: \.element) { i, d in
+                        if i > 0 { Divider().overlay(T.sep) }
+                        DestDraftRow(url: d)
+                    }
+                }
+            }
+            if model.draftDests.count < AppModel.maxDestinations {
+                Ghost(icon: "externaldrive.badge.plus",
+                      title: model.draftDests.isEmpty ? "Drop the folders to copy to" : "Drop another destination",
+                      detail: "Up to \(AppModel.maxDestinations) drives at once. A reports folder is made next to each copy.",
+                      hover: destHover, button: "Choose…") { model.chooseDestinations() }
+                    .frame(minHeight: 110, maxHeight: model.draftDests.isEmpty ? .infinity : 140)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $destHover) { dropped($0) { model.addDestination($0) } }
+    }
+}
+
+/// One destination in the new-transfer area, with what will be created there.
+struct DestDraftRow: View {
+    @EnvironmentObject var model: AppModel
+    let url: URL
+
+    var body: some View {
+        let problem = model.roomProblem(for: url)
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "externaldrive").font(.system(size: 18)).foregroundStyle(T.label2).frame(width: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(Fmt.volumeName(url)).font(.system(size: 14, weight: .semibold)).foregroundStyle(T.label)
+                Text(Fmt.shortPath(url)).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
+                    .lineLimit(1).truncationMode(.middle)
+                if let src = model.draftSource {
+                    let name = Plan.targetName(for: src, in: url)
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder.badge.plus").foregroundStyle(T.blue)
+                        Text(name).foregroundStyle(T.label)
+                        Text("+").foregroundStyle(T.label3)
+                        Image(systemName: "doc.text").foregroundStyle(T.label2)
+                        Text(name + " Reports").foregroundStyle(T.label2)
+                        if name != Plan.sourceName(src) {
+                            Text("(\(Plan.sourceName(src)) is already there)").foregroundStyle(T.label3)
+                        }
+                    }
+                    .font(.system(size: 12))
+                }
+                if let problem {
+                    Text(problem).font(.system(size: 12, weight: .medium)).foregroundStyle(T.red)
+                }
+            }
+            Spacer()
+            if let free = Plan.freeSpace(url) {
+                Text("\(Fmt.bytes(free)) free").font(.system(size: 11.5)).foregroundStyle(problem == nil ? T.label3 : T.red)
+            }
+            Button { model.removeDestination(url) } label: { Image(systemName: "xmark.circle.fill") }
+                .buttonStyle(.plain).foregroundStyle(T.label3).help("Remove")
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+/// Dashed "drop here" area.
+struct Ghost: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let hover: Bool
+    let button: String
+    let action: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 30, weight: .light)).foregroundStyle(hover ? T.blue : T.label3)
+            Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(hover ? T.label : T.label2)
+            Text(detail).font(.system(size: 12)).foregroundStyle(T.label3).multilineTextAlignment(.center)
+            Button(button, action: action).buttonStyle(SecondaryButtonStyle()).padding(.top, 2)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(RoundedRectangle(cornerRadius: 10).fill(hover ? T.blue.opacity(0.10) : T.fill2.opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(hover ? T.blue : Color.white.opacity(0.2), style: StrokeStyle(lineWidth: 1.5, dash: [7, 5])))
+    }
+}
+
+// MARK: - A transfer's details
+
+struct TransferDetail: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var t: Transfer
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                Card {
+                    SectionLabel(text: "Transfer from")
+                    Text(t.sourceName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                    Text(t.source.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                    Text("\(Fmt.count(t.totalFiles, "file")) · \(Fmt.bytes(t.totalBytes))")
+                        .font(.system(size: 12.5)).foregroundStyle(T.label2)
+                }
+                Card {
+                    SectionLabel(text: "Transfer to · \(Fmt.count(t.parents.count, "destination"))")
+                    ForEach(t.parents.indices, id: \.self) { d in
+                        if d > 0 { Divider().overlay(T.sep) }
+                        destRow(d)
+                    }
+                }
+                stats
+                if t.state.running, !t.snap.current.isEmpty, t.state == .copying {
+                    Text("Now: \(t.snap.current)")
+                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                problems
+                recovered
+                Text("Checksum: xxHash64. The source is read once; every copy is read back off its drive and compared.")
+                    .font(.system(size: 11.5)).foregroundStyle(T.label3)
+            }
+            .padding(.bottom, 20)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Text(t.sourceName).font(.system(size: 20, weight: .bold)).foregroundStyle(T.label)
+            Pill(text: t.label, color: t.color)
+            Spacer()
+            if t.state.running {
+                Button { model.togglePause(t) } label: {
+                    Label(t.paused ? "Resume" : "Pause", systemImage: t.paused ? "play.fill" : "pause.fill")
+                }
+                .buttonStyle(SecondaryButtonStyle(tint: T.orange))
+                Button { model.cancel(t) } label: { Label("Cancel", systemImage: "xmark") }
+                    .buttonStyle(SecondaryButtonStyle(tint: T.tan))
+            } else if t.state == .queued {
+                Button { model.moveQueued(t, up: true) } label: { Image(systemName: "arrow.up") }
+                    .buttonStyle(SecondaryButtonStyle()).help("Move up in the queue")
+                Button { model.moveQueued(t, up: false) } label: { Image(systemName: "arrow.down") }
+                    .buttonStyle(SecondaryButtonStyle()).help("Move down in the queue")
+                Button { model.cancel(t) } label: { Label("Remove from Queue", systemImage: "xmark") }
+                    .buttonStyle(SecondaryButtonStyle(tint: T.tan))
+            }
+        }
+    }
+
+    @ViewBuilder private func destRow(_ d: Int) -> some View {
+        let parent = t.parents[d]
+        let target = d < t.targets.count ? t.targets[d] : nil
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "externaldrive").font(.system(size: 18)).foregroundStyle(T.label2).frame(width: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(Fmt.volumeName(parent)).font(.system(size: 14, weight: .semibold)).foregroundStyle(T.label)
+                Text(Fmt.shortPath(target ?? parent)).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                if t.state.finished {
+                    let s = t.destinationSummary(d)
+                    Text(s.text).font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(s.ok ? T.green : t.state == .canceled ? T.tan : T.red)
+                    HStack(spacing: 8) {
+                        if d < t.reports.count, let r = t.reports[d] {
+                            Button("Open Report") { NSWorkspace.shared.open(r) }.buttonStyle(SecondaryButtonStyle())
+                        }
+                        if let target {
+                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([target]) }
+                                .buttonStyle(SecondaryButtonStyle())
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 5) {
+                Bar(fraction: t.destinationFraction(d), color: barColor(d))
+                    .frame(width: 230)
+                Text(barText(d)).font(.system(size: 11.5)).foregroundStyle(T.label2)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func barColor(_ d: Int) -> Color {
+        if t.state.finished {
+            return t.destinationSummary(d).ok ? T.green : t.state == .canceled ? T.tan : T.red
+        }
+        return t.paused ? T.orange : t.state == .verifying ? T.purple : T.blue
+    }
+
+    private func barText(_ d: Int) -> String {
+        switch t.state {
+        case .queued: return "Waiting"
+        case .scanning: return "Starting…"
+        case .copying: return "Copied " + Fmt.partOf(d < t.snap.written.count ? t.snap.written[d] : 0, t.totalBytes)
+        case .verifying: return "Verified " + Fmt.partOf(d < t.snap.verified.count ? t.snap.verified[d] : 0, t.totalBytes)
+        case .retrying: return "Copying failed files again…"
+        case .report: return "Writing report…"
+        default: return ""
+        }
+    }
+
+    private var stats: some View {
+        let stage: (String, Color) = t.paused && t.state.running ? ("Paused", T.orange)
+            : t.state == .copying || t.state == .scanning ? ("1 · Copying", T.blue)
+            : t.state == .verifying ? ("2 · Verifying", T.purple)
+            : t.state == .retrying ? ("3 · Retrying \(t.retryCount)", T.blue)
+            : (t.label, t.color)
+        let filesDone = t.state == .verifying ? (t.snap.filesVerified.max() ?? 0) : t.snap.filesCopied
+        return HStack(spacing: 10) {
+            Stat(title: "Stage", value: stage.0, color: stage.1)
+            Stat(title: t.state.finished ? "Average copy speed" : "Speed",
+                 value: t.state.finished ? avgSpeed : t.speed > 0 ? Fmt.rate(t.speed) : "—")
+            Stat(title: "Files", value: t.state.finished || t.state == .queued ? t.totalFiles.formatted()
+                 : "\(filesDone.formatted()) / \(t.totalFiles.formatted())")
+            Stat(title: t.state.finished ? "Total time" : "Time left in stage",
+                 value: t.state.finished ? Fmt.duration(t.elapsed) : t.secondsLeft.map { "~" + Fmt.duration($0) } ?? "—")
+        }
+    }
+
+    private var avgSpeed: String {
+        guard let o = t.outcome else { return "—" }
+        let s = o.copyFinished.timeIntervalSince(o.copyStarted)
+        return s > 0 ? Fmt.rate(Double(o.scan.bytes) / s) : "—"
+    }
+
+    @ViewBuilder private var problems: some View {
+        if let o = t.outcome, t.state == .failed {
+            let bad = o.results.filter { $0.errors.contains { $0 != nil } }
+            Card {
+                SectionLabel(text: "Problems")
+                ForEach(Array(o.scan.problems.enumerated()), id: \.offset) { _, p in
+                    Text("\(p.0): \(p.1)").font(.system(size: 12)).foregroundStyle(T.red)
+                }
+                ForEach(bad.prefix(200), id: \.item.path) { r in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(r.item.path).font(.system(size: 12, weight: .medium)).foregroundStyle(T.label)
+                        ForEach(r.errors.indices, id: \.self) { i in
+                            if let e = r.errors[i] {
+                                Text("\(Fmt.volumeName(t.parents[i])): \(e)").font(.system(size: 11.5)).foregroundStyle(T.red)
+                            }
+                        }
+                    }
+                }
+                if bad.count > 200 { Text("…and \(bad.count - 200) more in the report").font(.system(size: 12)).foregroundStyle(T.label2) }
+            }
+        }
+        if let p = t.reportProblem {
+            Text(p).font(.system(size: 12)).foregroundStyle(T.red)
+        }
+    }
+}
+
+extension TransferDetail {
+    /// Files that failed the first time, were copied again and now match.
+    @ViewBuilder var recovered: some View {
+        if let o = t.outcome {
+            let again = o.results.filter { r in r.retried.contains(true) && !r.errors.contains { $0 != nil } }
+            if !again.isEmpty {
+                Card {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(T.amber)
+                        SectionLabel(text: "Needed a second copy · now verified")
+                    }
+                    Text("These failed the first time, so Clone Ranger copied just these again from the source and read them back. They match now. They're listed in the report too.")
+                        .font(.system(size: 12)).foregroundStyle(T.label2)
+                    ForEach(again.prefix(100), id: \.item.path) { r in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(r.item.path).font(.system(size: 12, weight: .medium)).foregroundStyle(T.label)
+                            ForEach(r.firstError.indices, id: \.self) { i in
+                                if let e = r.firstError[i] {
+                                    Text("\(Fmt.volumeName(t.parents[i])) first try: \(e)").font(.system(size: 11.5)).foregroundStyle(T.amber)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct Stat: View {
+    let title: String
+    let value: String
+    var color: Color = T.label
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.system(size: 11)).foregroundStyle(T.label3)
+            Text(value).font(.system(size: 17, weight: .semibold)).foregroundStyle(color)
+                .lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: T.radius).fill(T.fill))
+    }
+}
