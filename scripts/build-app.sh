@@ -8,6 +8,7 @@ VERSION=$(cat VERSION | tr -d '[:space:]')
 NAME="Clone Ranger"
 APP="${BUILD_DIR:-build}/$NAME.app"   # BUILD_DIR=… to leave a running build/ copy alone
 
+scripts/vendor-sdks.sh
 swift build -c release --product CloneRanger
 
 # App icon, drawn by the app itself (same drawing as the top bar and the report).
@@ -24,6 +25,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/CloneRanger "$APP/Contents/MacOS/$NAME"
 cp assets/AppIcon.icns "$APP/Contents/Resources/"
+# Camera RAW decoders (loaded at run time; their makers' licenses allow shipping them inside the app).
+mkdir -p "$APP/Contents/Frameworks"
+[[ -d Vendor/BlackmagicRAW/BlackmagicRawAPI.framework ]] && ditto Vendor/BlackmagicRAW/BlackmagicRawAPI.framework "$APP/Contents/Frameworks/BlackmagicRawAPI.framework"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
