@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CRCore
 import SwiftUI
 
@@ -202,7 +203,16 @@ final class AppModel: ObservableObject {
     var history: [Transfer] {
         transfers.filter { $0.state.finished }.sorted { ($0.finished ?? $0.created) > ($1.finished ?? $1.created) }
     }
-    var busy: Bool { !active.isEmpty }
+    /// Something is running or waiting to be resumed (new transfers queue behind it).
+    var busy: Bool { !active.isEmpty || !interrupted.isEmpty }
+    private var watchers: [UUID: AnyCancellable] = [:]
+
+    /// The lists (active / stopped / queued / history) regroup whenever a transfer changes state.
+    private func watch(_ t: Transfer) {
+        watchers[t.id] = t.$state.removeDuplicates().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.objectWillChange.send() }
+        }
+    }
     var selectedTransfer: Transfer? { transfers.first { $0.id == selected } }
 
     private func tickAll() {
@@ -282,6 +292,7 @@ final class AppModel: ObservableObject {
     func commit() {
         guard draftReady, let src = draftSource, let scan = draftScan else { return }
         let t = Transfer(source: src, parents: draftDests, bytes: scan.bytes, files: scan.files)
+        watch(t)
         transfers.append(t)
         selected = t.id
         clearDraft()
@@ -357,6 +368,7 @@ final class AppModel: ObservableObject {
         t.totalFiles = outcome.scan.files
         t.paused = false
         t.control.paused = false
+        t.speed = 0
 
         if outcome.interrupted {
             // Wait for the card or drive to come back; the person decides how to resume.
@@ -431,6 +443,7 @@ final class AppModel: ObservableObject {
             let t = Transfer(unfinished: st, id: id)
             t.waitingFor = t.job?.waitingFor()
             for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path, default: []].insert((target as NSString).lastPathComponent.lowercased()) }
+            watch(t)
             transfers.append(t)
             selected = selected ?? t.id
         }

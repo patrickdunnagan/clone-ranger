@@ -65,7 +65,7 @@ struct CenterColumn: View {
                 .buttonStyle(PrimaryButtonStyle(large: true))
                 .keyboardShortcut("n", modifiers: .command)
                 if model.busy {
-                    Text("A transfer is running · new ones wait in line")
+                    Text(model.active.isEmpty ? "A transfer is stopped · new ones wait until it's resumed or stopped" : "A transfer is running · new ones wait in line")
                         .font(.system(size: 12))
                         .foregroundStyle(T.label3)
                 }
@@ -359,7 +359,7 @@ struct TransferDetail: View {
         return HStack(spacing: 10) {
             Stat(title: "Stage", value: stage.0, color: stage.1)
             Stat(title: t.state.finished ? "Average copy speed" : "Speed",
-                 value: t.state.finished ? avgSpeed : t.speed > 0 ? Fmt.rate(t.speed) : "—")
+                 value: t.state.finished ? avgSpeed : t.speed > 0 && t.state.running ? Fmt.rate(t.speed) : "—")
             Stat(title: "Files", value: t.state.finished || t.state == .queued ? t.totalFiles.formatted()
                  : "\(filesDone.formatted()) / \(t.totalFiles.formatted())")
             Stat(title: t.state.finished ? "Total time" : "Time left in stage",
