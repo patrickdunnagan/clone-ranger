@@ -1,5 +1,6 @@
 import AVFoundation
 import BRAWBridge
+import R3DBridge
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -18,9 +19,38 @@ enum FrameGrab {
         return candidates.first { fm.fileExists(atPath: $0 + "/BlackmagicRawAPI.framework") }
     }()
 
-    /// Formats this build can make a frame for (BRAW only when its library is present).
+    /// Folder holding REDR3D.dylib: inside the app, else the vendored SDK (development).
+    static let r3dLibDir: String? = {
+        let fm = FileManager.default
+        let dev = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Vendor/RED/Redistributable").path
+        let candidates = [ProcessInfo.processInfo.environment["CR_R3D_LIB"], Bundle.main.privateFrameworksPath, dev].compactMap { $0 }
+        return candidates.first { fm.fileExists(atPath: $0 + "/REDR3D.dylib") }
+    }()
+
+    /// Formats this build can make a frame for (RAW only when its library is present).
     static func canPreview(_ ext: String) -> Bool {
-        videoExtensions.contains(ext) || (ext == "braw" && brawLibDir != nil)
+        videoExtensions.contains(ext) || (ext == "braw" && brawLibDir != nil) || (ext == "r3d" && r3dLibDir != nil)
+    }
+
+    static func r3dStill(_ path: String) -> Still {
+        var out = Still()
+        guard let lib = r3dLibDir else { return out }
+        var s = R3DStill()
+        if r3d_grab(lib, path, 0.1, 480, &s) == 1, let px = s.bgra {
+            defer { r3d_free(&s) }
+            let w = Int(s.width), h = Int(s.height)
+            let data = Data(bytes: px, count: w * h * 4)
+            if let provider = CGDataProvider(data: data as CFData) {
+                out.image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                                    space: CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue),
+                                    provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+            }
+        }
+        if s.clipWidth > 0 { out.dimensions = "\(s.clipWidth)×\(s.clipHeight)" }
+        if s.duration > 0 { out.duration = s.duration }
+        return out
     }
 
     static func brawStill(_ path: String) -> Still {
@@ -59,10 +89,10 @@ enum FrameGrab {
     static func still(for url: URL) async -> Still {
         var out = Still()
         let e = url.pathExtension.lowercased()
-        if e == "braw" {
+        if e == "braw" || e == "r3d" {
             // Decoding is blocking C++; give it a worker thread and the same 20 s limit as video.
             return await withTaskGroup(of: Still?.self) { group in
-                group.addTask { await Task.detached { brawStill(url.path) }.value }
+                group.addTask { await Task.detached { e == "braw" ? brawStill(url.path) : r3dStill(url.path) }.value }
                 group.addTask { try? await Task.sleep(for: .seconds(20)); return nil }
                 let first = await group.next() ?? nil
                 group.cancelAll()
