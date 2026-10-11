@@ -227,7 +227,7 @@ final class AppModel: ObservableObject {
         NSApp.dockTile.badgeLabel = active.isEmpty && interrupted.isEmpty ? nil : "\(active.count + queued.count + interrupted.count)"
         saveCountdown -= 1
         if saveCountdown <= 0 {
-            saveCountdown = 80   // every 20 s
+            saveCountdown = 40   // every 10 s
             for t in active where t.state != .report { Journal.save(t) }
         }
     }
@@ -347,6 +347,7 @@ final class AppModel: ObservableObject {
                 case .writingReport, .done: break
                 }
                 t.stageChanged()
+                if case .scanning = stage {} else { Journal.save(t) }   // a crash from here on can be resumed
             }
         }
     }

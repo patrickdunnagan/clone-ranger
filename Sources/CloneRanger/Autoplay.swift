@@ -8,6 +8,24 @@ import CRCore
 enum Autoplay {
     static func startIfAsked(model: AppModel) {
         let env = ProcessInfo.processInfo.environment
+        if env["CR_AUTOPLAY"] == nil, let mode = env["CR_AUTOPLAY_REOPEN"] {
+            // Test: opened after a crash; show what's offered, resume, wait for the end.
+            let dir = URL(fileURLWithPath: env["CR_SNAP_DIR"] ?? NSTemporaryDirectory())
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                snap(dir, "9 reopened")
+                guard let t = model.interrupted.first else { snap(dir, "9b nothing to resume"); NSApp.terminate(nil); return }
+                while t.waitingFor != nil { try? await Task.sleep(for: .seconds(0.5)) }
+                model.resume(t, mode == "quick" ? .quick : .full)
+                while model.busy { try? await Task.sleep(for: .seconds(0.5)) }
+                try? await Task.sleep(for: .seconds(1))
+                model.selected = t.id
+                try? await Task.sleep(for: .seconds(0.5))
+                snap(dir, "10 done after reopen")
+                NSApp.terminate(nil)
+            }
+            return
+        }
         guard let spec = env["CR_AUTOPLAY"] else { return }
         let dir = URL(fileURLWithPath: env["CR_SNAP_DIR"] ?? NSTemporaryDirectory())
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

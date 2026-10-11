@@ -330,7 +330,8 @@ struct TransferDetail: View {
         if t.state.finished {
             return t.destinationSummary(d).ok ? T.green : t.state == .canceled ? T.tan : T.red
         }
-        return t.paused ? T.orange : t.state == .verifying ? T.purple : T.blue
+        return t.paused ? T.orange : t.state == .interrupted ? T.orange
+            : t.state == .verifying || t.state == .rechecking ? T.purple : T.blue
     }
 
     private func barText(_ d: Int) -> String {
