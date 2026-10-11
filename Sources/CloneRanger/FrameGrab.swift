@@ -1,4 +1,5 @@
 import AVFoundation
+import BRAWBridge
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -8,6 +9,39 @@ enum FrameGrab {
     static let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "mxf", "avi", "mts", "m2ts", "mkv", "mpg", "mpeg", "3gp", "insv"]
     /// RAW formats we list in the report but can't make a frame for yet (planned for a later version).
     static let rawExtensions: Set<String> = ["braw", "r3d", "crm", "ari", "nev"]
+
+    /// Folder holding BlackmagicRawAPI.framework: inside the app, else the installed SDK (development).
+    static let brawLibDir: String? = {
+        let fm = FileManager.default
+        let candidates = [Bundle.main.privateFrameworksPath,
+                          "/Applications/Blackmagic RAW/Blackmagic RAW SDK/Mac/Libraries"].compactMap { $0 }
+        return candidates.first { fm.fileExists(atPath: $0 + "/BlackmagicRawAPI.framework") }
+    }()
+
+    /// Formats this build can make a frame for (BRAW only when its library is present).
+    static func canPreview(_ ext: String) -> Bool {
+        videoExtensions.contains(ext) || (ext == "braw" && brawLibDir != nil)
+    }
+
+    static func brawStill(_ path: String) -> Still {
+        var out = Still()
+        guard let lib = brawLibDir else { return out }
+        var s = BRAWStill()
+        if braw_grab(lib, path, 0.1, 480, &s) == 1, let px = s.rgba {
+            defer { braw_free(&s) }
+            let w = Int(s.width), h = Int(s.height)
+            let data = Data(bytes: px, count: w * h * 4)
+            if let provider = CGDataProvider(data: data as CFData) {
+                out.image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                                    space: CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                    provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+            }
+        }
+        if s.clipWidth > 0 { out.dimensions = "\(s.clipWidth)×\(s.clipHeight)" }
+        if s.duration > 0 { out.duration = s.duration }
+        return out
+    }
 
     static func isClip(_ path: String) -> Bool {
         let e = (path as NSString).pathExtension.lowercased()
@@ -25,6 +59,16 @@ enum FrameGrab {
     static func still(for url: URL) async -> Still {
         var out = Still()
         let e = url.pathExtension.lowercased()
+        if e == "braw" {
+            // Decoding is blocking C++; give it a worker thread and the same 20 s limit as video.
+            return await withTaskGroup(of: Still?.self) { group in
+                group.addTask { await Task.detached { brawStill(url.path) }.value }
+                group.addTask { try? await Task.sleep(for: .seconds(20)); return nil }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first ?? Still()
+            }
+        }
         if videoExtensions.contains(e) {
             let asset = AVURLAsset(url: url)
             if let d = try? await asset.load(.duration), d.isNumeric, d.seconds > 0 { out.duration = d.seconds }

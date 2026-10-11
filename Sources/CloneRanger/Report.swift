@@ -244,7 +244,8 @@ enum ReportWriter {
                     let scale = min(tw / iw, th / ih)
                     pdf.image(img, x: x + (tw - iw * scale) / 2, y: pdf.y + (th - ih * scale) / 2, w: iw * scale, h: ih * scale)
                 } else {
-                    let raw = FrameGrab.rawExtensions.contains((r.item.path as NSString).pathExtension.lowercased())
+                    let ext = (r.item.path as NSString).pathExtension.lowercased()
+                    let raw = FrameGrab.rawExtensions.contains(ext) && !FrameGrab.canPreview(ext)
                     pdf.text(raw ? "RAW · no preview yet" : "No preview", x: x, y: pdf.y + th / 2 - 5, size: 8, color: CGColor(gray: 0.7, alpha: 1), width: tw, center: true)
                 }
                 let ok = !r.errors.contains { $0 != nil }

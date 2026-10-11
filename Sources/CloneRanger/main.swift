@@ -1,4 +1,5 @@
 import AppKit
+import BRAWBridge
 import CRCore
 
 // Build helper: CR_MAKE_ICON=<path.png> renders the 1024 px app icon and exits.
@@ -28,6 +29,14 @@ if let dir = ProcessInfo.processInfo.environment["CR_TEST_FRAMES"] {
         done.signal()
     }
     done.wait()
+    exit(0)
+}
+// Test only: CR_BRAW_OPTIONS=<clip.braw> prints the gamma and gamut names the clip accepts.
+if let clip = ProcessInfo.processInfo.environment["CR_BRAW_OPTIONS"], let lib = FrameGrab.brawLibDir {
+    var buf = [CChar](repeating: 0, count: 4096)
+    _ = braw_gamma_options(lib, clip, &buf, 4096)
+    print("library:", lib)
+    print(String(cString: buf))
     exit(0)
 }
 CloneRangerApp.main()
