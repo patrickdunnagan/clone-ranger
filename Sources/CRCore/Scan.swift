@@ -109,6 +109,7 @@ public enum Plan {
         func free(_ n: String) -> Bool {
             !taken.contains(n.lowercased())
                 && !FS.exists(FS.join(parent.path, n)) && !FS.exists(FS.join(parent.path, n + " Reports"))
+                && !FS.exists(FS.join(parent.path, n + " Unverified"))
         }
         if free(base) { return base }
         var i = 2

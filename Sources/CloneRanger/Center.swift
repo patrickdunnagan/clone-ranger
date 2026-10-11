@@ -386,6 +386,11 @@ struct TransferDetail: View {
                     }
                 }
                 if bad.count > 200 { Text("…and \(bad.count - 200) more in the report").font(.system(size: 12)).foregroundStyle(T.label2) }
+                if bad.contains(where: { !$0.unverified.joined().isEmpty }) {
+                    Text("Copies that failed their verify were moved to the Unverified folder, so the copy itself only holds verified files.")
+                        .font(.system(size: 12)).foregroundStyle(T.label2)
+                    unverifiedButtons
+                }
             }
         }
         if let p = t.reportProblem {
@@ -395,6 +400,21 @@ struct TransferDetail: View {
 }
 
 extension TransferDetail {
+    /// "Show CLIP Unverified" for each destination that has one.
+    @ViewBuilder var unverifiedButtons: some View {
+        HStack(spacing: 8) {
+            ForEach(t.targetPaths.indices, id: \.self) { d in
+                let folder = Engine.unverifiedFolder(forTarget: t.targetPaths[d])
+                if FS.exists(folder) {
+                    Button("Show \((folder as NSString).lastPathComponent) on \(Fmt.volumeName(t.parents[d]))") {
+                        NSWorkspace.shared.activateFileViewerSelecting([ReportWriter.exactURL(folder)])
+                    }
+                    .buttonStyle(SecondaryButtonStyle(tint: T.amber))
+                }
+            }
+        }
+    }
+
     /// Files that failed the first time, were copied again and now match.
     @ViewBuilder var recovered: some View {
         if let o = t.outcome {
@@ -405,8 +425,9 @@ extension TransferDetail {
                         Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(T.amber)
                         SectionLabel(text: "Needed a second copy · now verified")
                     }
-                    Text("These failed the first time, so Clone Ranger copied just these again from the source and read them back. They match now. They're listed in the report too.")
+                    Text("These failed the first time. The bad copy was moved to the Unverified folder next to the copy, then just these files were copied again from the source and read back. They match now and are where they belong. Delete the Unverified folder once you've looked.")
                         .font(.system(size: 12)).foregroundStyle(T.label2)
+                    unverifiedButtons
                     ForEach(again.prefix(100), id: \.item.path) { r in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(r.item.path).font(.system(size: 12, weight: .medium)).foregroundStyle(T.label)

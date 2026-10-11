@@ -32,6 +32,7 @@ public struct ItemResult: Sendable {
     public var verified: [Bool]         // per destination: read back and matched (links: created)
     public var retried: [Bool]          // per destination: failed the first time, copied again
     public var firstError: [String?]    // per destination: what went wrong the first time
+    public var unverified: [[String]]   // per destination: where copies that failed their verify were moved
 }
 
 public struct TransferOutcome: Sendable {
@@ -56,6 +57,14 @@ public enum Engine {
     /// Test only: change one byte of the first copied file on the first destination between the copy and
     /// the verify, to prove the verify catches it.
     nonisolated(unsafe) public static var corruptForTest = false
+    /// Test only: also damage every second and third copy, so the file ends up failed.
+    nonisolated(unsafe) public static var corruptAlwaysForTest = false
+
+    /// "Day 2/CLIP" → "Day 2/CLIP Unverified": copies that failed their verify are moved here, under the
+    /// same folders, so the real copy only ever holds verified files.
+    public static func unverifiedFolder(forTarget t: String) -> String {
+        FS.join((t as NSString).deletingLastPathComponent, (t as NSString).lastPathComponent + " Unverified")
+    }
 
     /// Copies everything in `source` into each of `targets` (the new "CLIP" / "CLIP 2" folders, not yet
     /// created), then reads every destination back and compares checksums. The source is only ever read.
@@ -89,7 +98,7 @@ public enum Engine {
             }
         }
 
-        var results = scan.items.map { ItemResult(item: $0, hash: nil, errors: destProblems, verified: Array(repeating: false, count: n), retried: Array(repeating: false, count: n), firstError: Array(repeating: nil, count: n)) }
+        var results = scan.items.map { ItemResult(item: $0, hash: nil, errors: destProblems, verified: Array(repeating: false, count: n), retried: Array(repeating: false, count: n), firstError: Array(repeating: nil, count: n), unverified: Array(repeating: [], count: n)) }
         let live = (0..<n).filter { destProblems[$0] == nil }
         let copyStarted = Date()
         stage(.copying)
@@ -109,6 +118,31 @@ public enum Engine {
         let bigGate = DispatchSemaphore(value: 0)
         bigGate.signal()   // one big file at a time: cards and drives read best in one long run
         var corrupted = false
+        var failedVerify = Set<Int>()   // k * 8 + d: copies that were read back and didn't match (or couldn't be read)
+
+        /// Moves a copy that failed its verify out of the real copy into "<name> Unverified", same folders.
+        func moveToUnverified(_ k: Int, _ d: Int) {
+            let path = scan.items[k].path
+            let from = FS.join(targets[d], path)
+            guard FS.exists(from) else { return }
+            var to = FS.join(unverifiedFolder(forTarget: targets[d]), path)
+            let ext = (path as NSString).pathExtension
+            let stem = ((to as NSString).lastPathComponent as NSString).deletingPathExtension
+            var i = 2
+            while FS.exists(to) {
+                let name = "\(stem) (try \(i))" + (ext.isEmpty ? "" : "." + ext)
+                to = FS.join((to as NSString).deletingLastPathComponent, name)
+                i += 1
+            }
+            do {
+                try FS.makeFolders((to as NSString).deletingLastPathComponent)
+                if rename(from, to) != 0 { throw CopyError.io(FS.errorText()) }
+                results[k].unverified[d].append(to)
+            } catch {
+                // Couldn't move it: delete it so the real copy never holds a bad file.
+                unlink(from)
+            }
+        }
 
         /// Reads one copy back off its drive and compares it with the source checksum.
         func verifyOne(_ k: Int, _ d: Int, counting: Bool) {
@@ -131,6 +165,7 @@ public enum Engine {
             lock.withLock {
                 results[k].errors[d] = err
                 results[k].verified[d] = err == nil
+                if err != nil && !control.cancelled { failedVerify.insert(k * 8 + d) }
             }
             if counting { progress.update { $0.filesVerified[d] += 1 } }
         }
@@ -230,11 +265,20 @@ public enum Engine {
                 let dests = live.filter { results[k].errors[$0] != nil && !results[k].verified[$0] }
                 for d in dests where results[k].firstError[d] == nil { results[k].firstError[d] = results[k].errors[d] }
                 let urls = dests.map { FS.join(targets[$0], item.path) }
-                for u in urls { unlink(u) }   // our own bad copy from moments ago
+                for d in dests {
+                    if failedVerify.contains(k * 8 + d) { moveToUnverified(k, d) } else { unlink(FS.join(targets[d], item.path)) }
+                    failedVerify.remove(k * 8 + d)
+                }
                 progress.update { $0.current = item.path }
                 let out = MultiCopy.copy(FS.join(source, item.path), to: urls, local: dests.map { local[$0] },
                                          control: control, read: { _ in }, wrote: { _, _ in })
                 let newHash = out.hash.map(XXHash64.hex)
+                if corruptAlwaysForTest, out.errors.allSatisfy({ $0 == nil }), dests.first == 0 {
+                    let fd = open(urls[0], O_WRONLY)
+                    var b: UInt8 = 0x5A
+                    _ = pwrite(fd, &b, 1, 1000)
+                    close(fd)
+                }
                 for (i, d) in dests.enumerated() {
                     results[k].retried[d] = true
                     if let e = out.sourceError ?? out.errors[i] {
@@ -250,6 +294,9 @@ public enum Engine {
                 }
             }
         }
+
+        // A copy that still fails its verify after the last try leaves the real copy too.
+        for key in failedVerify.sorted() { moveToUnverified(key / 8, key % 8) }
 
         // Folder dates last (writing into a folder changes its date), deepest first.
         for r in results.reversed() where r.item.kind == .folder {

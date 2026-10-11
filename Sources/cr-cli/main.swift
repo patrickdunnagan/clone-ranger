@@ -53,6 +53,7 @@ let progress = TransferProgress(destinations: targets.count)
 let t0 = Date()
 var stageTimes: [String] = []
 if env["CR_TEST_CORRUPT"] != nil { Engine.corruptForTest = true }
+if env["CR_TEST_CORRUPT_ALWAYS"] != nil { Engine.corruptForTest = true; Engine.corruptAlwaysForTest = true }
 let out = Engine.run(source: args[0], targets: targets, control: JobControl(), progress: progress) { s in
     stageTimes.append("\(s) at \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
 }
@@ -69,6 +70,7 @@ for r in out.results where r.errors.contains(where: { $0 != nil }) {
     bad += 1
     if bad <= 20 { print("FAIL \(r.item.path): \(r.errors.compactMap { $0 }.joined(separator: " / "))") }
 }
+for r in out.results where !r.unverified.joined().isEmpty { print("UNVERIFIED COPY: \(r.unverified.joined().joined(separator: ", "))") }
 for r in out.results where r.retried.contains(true) { print("RE-COPIED: \(r.item.path) first: \(r.firstError.compactMap { $0 }.joined()) now: \(r.errors.map { $0 ?? "OK" }.joined(separator: ", "))") }
 print(bad == 0 && s.problems.isEmpty ? "ALL VERIFIED" : "\(bad) failed")
 exit(bad == 0 ? 0 : 1)

@@ -177,6 +177,9 @@ enum ReportWriter {
                     guard let e else { continue }
                     pdf.y += pdf.wrapped("\(volumeName(ofTarget: d.targets[i])): \(e)", x: X + 10, y: pdf.y, width: W - 10, size: 8, color: o.canceled ? tan : red) + 2
                 }
+                for m in r.unverified.joined() {
+                    pdf.y += pdf.wrapped("Bad copy kept for checking: \(m)", x: X + 10, y: pdf.y, width: W - 10, size: 7.5, color: gray, mono: true) + 2
+                }
                 pdf.y += 2
             }
             if failed.count > 500 { pdf.text("…and \(failed.count - 500) more", x: X, y: pdf.y, size: 8.5, color: gray); pdf.y += 12 }
@@ -187,7 +190,7 @@ enum ReportWriter {
             let amber = CGColor(srgbRed: 0.72, green: 0.50, blue: 0.0, alpha: 1)
             pdf.y += 6
             pdf.heading("Needed a second copy (\(recovered.count)) · now verified", color: amber)
-            pdf.y += pdf.wrapped("These failed the first time. Clone Ranger copied just these files again from the source and read them back; they now match. Usually a network hiccup; if it happens on a local drive, check the cable, reader and drive.",
+            pdf.y += pdf.wrapped("These failed the first time. Clone Ranger moved the bad copy into the \"Unverified\" folder next to the copy, copied just these files again from the source and read them back; they now match and sit where they belong. The Unverified folder can be deleted once checked. Usually a network hiccup; if it happens on a local drive, check the cable, reader and drive.",
                                  x: X, y: pdf.y, width: W, size: 8, color: gray) + 6
             for r in recovered {
                 pdf.ensure(22)
@@ -196,6 +199,12 @@ enum ReportWriter {
                 for (i, e) in r.firstError.enumerated() {
                     guard let e else { continue }
                     pdf.y += pdf.wrapped("\(volumeName(ofTarget: d.targets[i])) first try: \(e)", x: X + 10, y: pdf.y, width: W - 10, size: 8, color: amber) + 2
+                }
+                for (i, moved) in r.unverified.enumerated() {
+                    for m in moved {
+                        pdf.y += pdf.wrapped("Bad copy kept for checking: \(m)", x: X + 10, y: pdf.y, width: W - 10, size: 7.5, color: gray, mono: true) + 2
+                    }
+                    _ = i
                 }
                 pdf.y += 2
             }

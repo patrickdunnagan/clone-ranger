@@ -11,6 +11,7 @@ if let mb = ProcessInfo.processInfo.environment["CR_THROTTLE"].flatMap(Double.in
     MultiCopy.throttle = mb * 1_000_000
 }
 if ProcessInfo.processInfo.environment["CR_TEST_CORRUPT"] != nil { Engine.corruptForTest = true }
+if ProcessInfo.processInfo.environment["CR_TEST_CORRUPT_ALWAYS"] != nil { Engine.corruptForTest = true; Engine.corruptAlwaysForTest = true }
 // Test only: CR_TEST_FRAMES=<folder> CR_SNAP_DIR=<dir> saves the report still for every clip, then exits.
 if let dir = ProcessInfo.processInfo.environment["CR_TEST_FRAMES"] {
     let out = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CR_SNAP_DIR"] ?? NSTemporaryDirectory())

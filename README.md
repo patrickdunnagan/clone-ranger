@@ -2,7 +2,7 @@
 
 Verified offload for the Mac, in the spirit of ShotPut Pro. Reads the source once, writes it to up to four
 destinations at the same time, then reads every copy back off its drive and compares xxHash64 checksums.
-Anything that fails is copied again from the source (just those files, two more tries) and flagged.
+Anything that fails its verify is moved to "<folder> Unverified" (same subfolders), then just those files are copied again from the source (two more tries) and flagged.
 A PDF report (frame per video clip) lands in "<folder> Reports" next to each copy.
 
 Build: `scripts/build-app.sh` → `build/Clone Ranger.app` and `dist/Clone Ranger <version>.zip` (keeps the 5 newest).
