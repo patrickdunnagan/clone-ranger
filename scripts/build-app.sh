@@ -28,6 +28,7 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/"
 # Camera RAW decoders (loaded at run time; their makers' licenses allow shipping them inside the app).
 mkdir -p "$APP/Contents/Frameworks"
 [[ -d Vendor/BlackmagicRAW/BlackmagicRawAPI.framework ]] && ditto Vendor/BlackmagicRAW/BlackmagicRawAPI.framework "$APP/Contents/Frameworks/BlackmagicRawAPI.framework"
+[[ -f Vendor/RED/Redistributable/REDR3D.dylib ]] && cp Vendor/RED/Redistributable/REDR3D.dylib "$APP/Contents/Frameworks/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

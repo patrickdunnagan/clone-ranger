@@ -11,6 +11,8 @@ dates, start/end of each file, last two files in full); destinations are always 
 with the same name is refused (volume ID + file list). A progress file in ~/Library/Application Support/Clone
 Ranger/Unfinished lets a quit or crash be resumed the same way.
 
+Camera RAW frames: BRAW (Blackmagic RAW SDK) and R3D incl. Nikon R3D NE (RED R3D SDK). Run `scripts/vendor-sdks.sh` (the build does) with the Blackmagic RAW installer in /Applications and an R3DSDKv* folder in ~/Downloads; the SDKs stay out of git, their runtime libraries go in Contents/Frameworks. Without them the app builds and RAW clips show "no preview".
+
 Build: `scripts/build-app.sh` → `build/Clone Ranger.app` and `dist/Clone Ranger <version>.zip` (keeps the 5 newest).
 
 Engine notes
