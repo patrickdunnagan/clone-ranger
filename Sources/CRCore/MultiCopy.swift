@@ -196,6 +196,34 @@ public enum MultiCopy {
         return outcome
     }
 
+    /// How much of the start and of the end of a file the quick check compares.
+    public static let sampleBytes: Int64 = 64 * 1024 * 1024
+
+    /// xxHash64 of the first and last `sampleBytes` of a file (the whole file if it's smaller), or nil.
+    public static func sample(_ path: String) -> String? {
+        let fd = open(path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { return nil }
+        let size = Int64(st.st_size)
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: chunk, alignment: 4096)
+        defer { buf.deallocate() }
+        var hasher = XXHash64()
+        let ranges: [(Int64, Int64)] = size <= 2 * sampleBytes ? [(Int64(0), size)] : [(Int64(0), sampleBytes), (size - sampleBytes, size)]
+        for (from, to) in ranges {
+            var off = from
+            while off < to {
+                let r = pread(fd, buf, Int(min(Int64(chunk), to - off)), off_t(off))
+                if r < 0 { if errno == EINTR { continue }; return nil }
+                if r == 0 { return nil }
+                hasher.update(UnsafeRawBufferPointer(start: buf, count: r))
+                off += Int64(r)
+            }
+        }
+        return "\(size):" + XXHash64.hex(hasher.finalize())
+    }
+
     /// How much of a file is sitting in the Mac's memory cache right now (0…1), from mincore().
     public static func residentFraction(_ path: String) -> Double {
         let fd = open(path, O_RDONLY)

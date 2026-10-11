@@ -1,4 +1,5 @@
 import AppKit
+import CRCore
 
 /// Test hook: CR_AUTOPLAY="<source>|<dest>|<dest>…" fills in a transfer, runs it, and saves window
 /// pictures to CR_SNAP_DIR along the way, then quits. Environment variables, not arguments: AppKit
@@ -34,7 +35,17 @@ enum Autoplay {
             }
             var shots = 0
             var sawVerify = false
-            while model.busy || !model.queued.isEmpty {
+            let resumeMode = env["CR_AUTOPLAY_RESUME"].map { $0 == "quick" ? ResumeMode.quick : .full }
+            var sawStop = false, sawBack = false, sawRecheck = false
+            while model.busy || !model.queued.isEmpty || (resumeMode != nil && !model.interrupted.isEmpty) {
+                if let mode = resumeMode, let s = model.interrupted.first {
+                    if s.waitingFor != nil && !sawStop { sawStop = true; snap(dir, "6 unplugged") }
+                    if s.waitingFor == nil {
+                        if !sawBack { sawBack = true; try? await Task.sleep(for: .seconds(0.5)); snap(dir, "7 ready to resume") }
+                        model.resume(s, mode)
+                    }
+                }
+                if model.active.first?.state == .rechecking, !sawRecheck { sawRecheck = true; try? await Task.sleep(for: .seconds(0.4)); snap(dir, "8 rechecking") }
                 try? await Task.sleep(for: .seconds(1))
                 let t = model.active.first
                 if t?.state == .copying, shots < 1, (t?.fraction ?? 0) > 0.3 {

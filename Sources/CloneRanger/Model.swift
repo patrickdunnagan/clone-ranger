@@ -3,16 +3,16 @@ import CRCore
 import SwiftUI
 
 enum TState: Equatable {
-    case queued, scanning, copying, verifying, retrying, report, verified, failed, canceled
+    case queued, scanning, copying, verifying, retrying, rechecking, report, interrupted, verified, failed, canceled
 
-    var running: Bool { [.scanning, .copying, .verifying, .retrying, .report].contains(self) }
+    var running: Bool { [.scanning, .copying, .verifying, .retrying, .rechecking, .report].contains(self) }
     var finished: Bool { [.verified, .failed, .canceled].contains(self) }
 }
 
 /// One transfer: a source folder copied into up to four destination folders.
 @MainActor
 final class Transfer: ObservableObject, Identifiable {
-    let id = UUID()
+    let id: UUID
     let source: URL
     let sourceName: String
     let parents: [URL]                       // the folders dropped as destinations
@@ -28,7 +28,10 @@ final class Transfer: ObservableObject, Identifiable {
     @Published var outcome: TransferOutcome?
     @Published var reports: [URL?] = []      // PDF per destination
     @Published var reportProblem: String?
-    let created = Date()
+    @Published var waitingFor: String?       // interrupted: what still needs plugging back in
+    @Published var interruptedBy = ""        // "A001 was unplugged" / "Clone Ranger quit before this finished"
+    var job: TransferJob?
+    var created = Date()
     var started: Date?
     var stageStarted: Date?
     var finished: Date?
@@ -36,7 +39,8 @@ final class Transfer: ObservableObject, Identifiable {
     var progress: TransferProgress?
     private var samples: [(Date, Int64)] = []
 
-    init(source: URL, parents: [URL], bytes: Int64, files: Int) {
+    init(source: URL, parents: [URL], bytes: Int64, files: Int, id: UUID = UUID()) {
+        self.id = id
         self.source = source
         self.sourceName = Plan.sourceName(source)
         self.parents = parents
@@ -44,7 +48,23 @@ final class Transfer: ObservableObject, Identifiable {
         self.totalFiles = files
     }
 
-    var displayState: TState { state }
+    /// Rebuilt from a progress file left by a transfer that didn't finish (Clone Ranger quit or crashed).
+    convenience init(unfinished st: JobState, id: UUID) {
+        let parents = st.targets.map { URL(fileURLWithPath: ($0 as NSString).deletingLastPathComponent) }
+        self.init(source: URL(fileURLWithPath: st.source), parents: parents, bytes: st.scan.bytes, files: st.scan.files, id: id)
+        targetPaths = st.targets
+        targets = st.targets.map { URL(fileURLWithPath: $0) }
+        started = st.copyStarted
+        created = st.copyStarted
+        let progress = TransferProgress(destinations: st.targets.count)
+        self.progress = progress
+        job = TransferJob(state: st, control: control, progress: progress) { _ in }
+        state = .interrupted
+        interruptedBy = "Clone Ranger quit before this finished"
+    }
+
+    var displayName: String { job?.sourceName ?? sourceName }
+    func volume(_ d: Int) -> String { job?.targetVolumes[d] ?? Fmt.volumeName(parents[d]) }
 
     /// What the colored pill and fill bar show.
     var color: Color {
@@ -52,8 +72,9 @@ final class Transfer: ObservableObject, Identifiable {
         switch state {
         case .queued: return T.label3
         case .scanning, .copying: return T.blue
-        case .verifying, .report: return T.purple
+        case .verifying, .report, .rechecking: return T.purple
         case .retrying: return T.blue
+        case .interrupted: return T.orange
         case .verified: return T.green
         case .failed: return T.red
         case .canceled: return T.tan
@@ -68,6 +89,8 @@ final class Transfer: ObservableObject, Identifiable {
         case .copying: return "Copying"
         case .verifying: return "Verifying"
         case .retrying: return "Retrying \(retryCount)"
+        case .rechecking: return "Re-checking"
+        case .interrupted: return waitingFor != nil ? "Unplugged" : "Ready to resume"
         case .report: return "Writing report"
         case .verified: return "✓ Verified"
         case .failed:
@@ -89,6 +112,10 @@ final class Transfer: ObservableObject, Identifiable {
         switch state {
         case .copying, .scanning: return Double(snap.read) / Double(totalBytes)
         case .verifying: return Double(snap.verified.reduce(0, +)) / Double(totalBytes * Int64(liveCount))
+        case .rechecking:
+            let total = snap.recheckSourceTotal + snap.recheckDestTotal
+            return total > 0 ? Double(snap.recheckSourceDone + snap.recheckDestDone) / Double(total) : 0
+        case .interrupted: return outcome.map { Double($0.copiedBytes) / Double(totalBytes) } ?? 0
         case .queued: return 0
         default: return 1
         }
@@ -100,6 +127,7 @@ final class Transfer: ObservableObject, Identifiable {
         switch state {
         case .copying, .scanning: return d < snap.written.count ? Double(snap.written[d]) / Double(totalBytes) : 0
         case .verifying: return d < snap.verified.count ? Double(snap.verified[d]) / Double(totalBytes) : 0
+        case .rechecking, .interrupted: return fraction
         case .queued: return 0
         default: return 1
         }
@@ -120,7 +148,8 @@ final class Transfer: ObservableObject, Identifiable {
     func tick() {
         guard let progress, state.running else { return }
         snap = progress.snapshot
-        let bytes = state == .verifying ? snap.verified.reduce(0, +) : snap.read
+        let bytes = state == .verifying ? snap.verified.reduce(0, +)
+            : state == .rechecking ? snap.recheckSourceDone + snap.recheckDestDone : snap.read
         let now = Date()
         if paused { samples.removeAll(); speed = 0; return }
         samples.append((now, bytes))
@@ -159,6 +188,7 @@ final class AppModel: ObservableObject {
     private var timer: Timer?
     private var activity: NSObjectProtocol?
     private var reserved: [String: Set<String>] = [:]   // parent path → names being created right now
+    private var saveCountdown = 80
 
     init() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -167,6 +197,7 @@ final class AppModel: ObservableObject {
     }
 
     var active: [Transfer] { transfers.filter { $0.state.running } }
+    var interrupted: [Transfer] { transfers.filter { $0.state == .interrupted } }
     var queued: [Transfer] { transfers.filter { $0.state == .queued } }
     var history: [Transfer] {
         transfers.filter { $0.state.finished }.sorted { ($0.finished ?? $0.created) > ($1.finished ?? $1.created) }
@@ -176,7 +207,19 @@ final class AppModel: ObservableObject {
 
     private func tickAll() {
         for t in active { t.tick() }
-        NSApp.dockTile.badgeLabel = active.isEmpty ? nil : "\(active.count + queued.count)"
+        for t in interrupted {
+            let w = t.job?.waitingFor()
+            if w == nil && t.waitingFor != nil {
+                Notify.post("\(t.displayName) is back", "Choose how to resume in Clone Ranger.")
+            }
+            if w != t.waitingFor { t.waitingFor = w }
+        }
+        NSApp.dockTile.badgeLabel = active.isEmpty && interrupted.isEmpty ? nil : "\(active.count + queued.count + interrupted.count)"
+        saveCountdown -= 1
+        if saveCountdown <= 0 {
+            saveCountdown = 80   // every 20 s
+            for t in active where t.state != .report { Journal.save(t) }
+        }
     }
 
     // MARK: New transfer
@@ -247,9 +290,10 @@ final class AppModel: ObservableObject {
 
     // MARK: Running
 
-    /// Starts queued transfers, oldest first, up to the "transfers at once" setting.
+    /// Starts queued transfers, oldest first, up to the "transfers at once" setting. An unplugged transfer
+    /// keeps its place, so the queue waits until it's resumed or stopped.
     func pump() {
-        while active.count < max(1, transfersAtOnce), let next = queued.first { start(next) }
+        while active.count + interrupted.count < max(1, transfersAtOnce), let next = queued.first { start(next) }
         if active.isEmpty, let a = activity {
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
@@ -273,41 +317,122 @@ final class AppModel: ObservableObject {
         t.started = Date()
         t.state = .scanning
         t.stageChanged()
-        let source = t.source.path, targets = t.targetPaths, control = t.control, csv = saveCSV
-        Task.detached(priority: .userInitiated) {
-            let outcome = Engine.run(source: source, targets: targets, control: control, progress: progress) { stage in
-                Task { @MainActor in
-                    switch stage {
-                    case .scanning: t.state = .scanning
-                    case .copying: t.state = .copying
-                    case .verifying: t.state = .verifying
-                    case .retrying(let n): t.state = .retrying; t.retryCount = n
-                    case .writingReport, .done: break
-                    }
-                    t.stageChanged()
+        let job = TransferJob(source: t.source.path, targets: t.targetPaths, control: t.control, progress: progress,
+                              stage: stageHandler(t))
+        t.job = job
+        Notify.askOnce()
+        run(t) { $0.start() }
+    }
+
+    private func stageHandler(_ t: Transfer) -> @Sendable (Stage) -> Void {
+        { stage in
+            Task { @MainActor in
+                switch stage {
+                case .scanning: t.state = .scanning
+                case .copying: t.state = .copying
+                case .verifying: t.state = .verifying
+                case .retrying(let n): t.state = .retrying; t.retryCount = n
+                case .rechecking: t.state = .rechecking
+                case .writingReport, .done: break
                 }
-            }
-            await MainActor.run {
-                t.snap = progress.snapshot
-                t.outcome = outcome
-                t.totalBytes = outcome.scan.bytes
-                t.totalFiles = outcome.scan.files
-                t.state = .report
                 t.stageChanged()
             }
-            let data = await MainActor.run { ReportData(t) }
-            let (reports, problem) = await ReportWriter.writeAll(data, csv: csv)
-            await MainActor.run {
-                t.reports = reports
-                t.reportProblem = problem
-                t.finished = Date()
-                t.paused = false
-                t.state = outcome.canceled ? .canceled : outcome.failedCount > 0 ? .failed : .verified
-                for (p, target) in zip(t.parents, targets) { self.reserved[p.path]?.remove((target as NSString).lastPathComponent.lowercased()) }
-                self.pump()
-                if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
-                NSSound(named: t.state == .verified ? "Glass" : "Basso")?.play()
-            }
+        }
+    }
+
+    /// Runs (or resumes) a transfer's job off the main thread, then wraps up.
+    private func run(_ t: Transfer, _ work: @escaping @Sendable (TransferJob) -> TransferOutcome) {
+        guard let job = t.job else { return }
+        pump()
+        Task.detached(priority: .userInitiated) {
+            let outcome = work(job)
+            await self.complete(t, outcome)
+        }
+    }
+
+    private func complete(_ t: Transfer, _ outcome: TransferOutcome) async {
+        t.snap = t.progress?.snapshot ?? t.snap
+        t.outcome = outcome
+        t.totalBytes = outcome.scan.bytes
+        t.totalFiles = outcome.scan.files
+        t.paused = false
+        t.control.paused = false
+
+        if outcome.interrupted {
+            // Wait for the card or drive to come back; the person decides how to resume.
+            t.state = .interrupted
+            t.waitingFor = t.job?.waitingFor()
+            t.interruptedBy = outcome.events.last(where: \.bad)?.text ?? "Something was unplugged"
+            Journal.save(t)
+            Notify.post("\(t.displayName) stopped", "\(t.interruptedBy). Plug it back in, then choose how to resume. Nothing copied so far is lost.")
+            NSSound(named: "Basso")?.play()
+            if !NSApp.isActive { NSApp.requestUserAttention(.criticalRequest) }
+            pump()
+            return
+        }
+
+        t.state = .report
+        t.stageChanged()
+        let data = ReportData(t)
+        let csv = saveCSV
+        let (reports, problem) = await Task.detached { await ReportWriter.writeAll(data, csv: csv) }.value
+        t.reports = reports
+        t.reportProblem = problem
+        t.finished = Date()
+        t.state = outcome.canceled ? .canceled : outcome.failedCount > 0 || outcome.fatal != nil ? .failed : .verified
+        for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path]?.remove((target as NSString).lastPathComponent.lowercased()) }
+        Journal.remove(t)
+        pump()
+        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+        NSSound(named: t.state == .verified ? "Glass" : "Basso")?.play()
+        Notify.post("\(t.displayName): \(t.label)", t.state == .verified ? "Every file was read back and matches." : "Open Clone Ranger for details.")
+    }
+
+    // MARK: After an unplug
+
+    func resume(_ t: Transfer, _ mode: ResumeMode) {
+        guard t.state == .interrupted, t.waitingFor == nil else { return }
+        t.state = .rechecking
+        t.stageChanged()
+        t.job?.stage = stageHandler(t)
+        run(t) { $0.resume(mode) }
+    }
+
+    /// Carries on without a destination that isn't coming back.
+    func finishWithout(_ t: Transfer, _ d: Int) {
+        let a = NSAlert()
+        a.messageText = "Finish without \(t.volume(d))?"
+        a.informativeText = "The other drives get everything. \(t.volume(d)) keeps what it has, but it won't be verified or finished, and the report marks it incomplete."
+        a.addButton(withTitle: "Finish Without It")
+        a.addButton(withTitle: "Keep Waiting")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        guard let job = t.job else { return }
+        if job.waitingFor() != nil && !FS.exists(t.source.path) { return }
+        t.state = .rechecking
+        t.stageChanged()
+        job.stage = stageHandler(t)
+        run(t) { $0.resume(.full, leaveOut: [d]) }
+    }
+
+    func stopHere(_ t: Transfer) {
+        let a = NSAlert()
+        a.messageText = "Stop \(t.displayName) here?"
+        a.informativeText = "What was copied stays where it is, but files copied before the stop aren't verified. The report lists what didn't finish."
+        a.addButton(withTitle: "Stop Here")
+        a.addButton(withTitle: "Keep Waiting")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        t.state = .report
+        run(t) { $0.giveUp() }
+    }
+
+    /// Transfers left unfinished last time Clone Ranger ran.
+    func loadUnfinished() {
+        for (id, st) in Journal.loadAll() where !transfers.contains(where: { $0.id == id }) {
+            let t = Transfer(unfinished: st, id: id)
+            t.waitingFor = t.job?.waitingFor()
+            for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path, default: []].insert((target as NSString).lastPathComponent.lowercased()) }
+            transfers.append(t)
+            selected = selected ?? t.id
         }
     }
 
@@ -317,13 +442,14 @@ final class AppModel: ObservableObject {
     }
 
     func cancel(_ t: Transfer) {
+        if t.state == .interrupted { stopHere(t); return }
         if t.state == .queued {
             transfers.removeAll { $0.id == t.id }
             if selected == t.id { selected = nil }
             return
         }
         let a = NSAlert()
-        a.messageText = "Cancel \(t.sourceName)?"
+        a.messageText = "Cancel \(t.displayName)?"
         a.informativeText = "Files already copied stay where they are. The transfer is marked canceled and the report says what didn't finish. Nothing on the source is touched."
         a.addButton(withTitle: "Cancel Transfer")
         a.addButton(withTitle: "Keep Going")

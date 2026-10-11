@@ -118,7 +118,8 @@ enum ReportWriter {
         pdf.y += 56
 
         let (status, color): (String, CGColor) =
-            o.canceled ? ("CANCELED · not everything was copied and verified", tan)
+            o.fatal != nil ? ("STOPPED · \(Fmt.count(o.failedCount, "file")) not copied and verified", red)
+            : o.canceled ? ("CANCELED · not everything was copied and verified", tan)
             : failed.isEmpty && o.scan.problems.isEmpty
                 ? ("VERIFIED · all \(Fmt.count(o.scan.files, "file")) match the source on \(Fmt.count(d.targets.count, "destination"))"
                     + (o.recoveredCount > 0 ? " · \(o.recoveredCount) on a second copy" : ""), green)
@@ -160,10 +161,24 @@ enum ReportWriter {
         pdf.text("▸ is the drive this copy of the report is on.", x: X, y: pdf.y, size: 7.5, color: gray)
         pdf.y += 12
 
+        if !o.events.isEmpty {
+            pdf.y += 6
+            pdf.heading("What happened along the way", color: o.events.contains(where: \.bad) ? CGColor(srgbRed: 0.85, green: 0.45, blue: 0.1, alpha: 1) : ink)
+            for e in o.events {
+                pdf.ensure(14)
+                pdf.text(e.date.formatted(date: .omitted, time: .standard), x: X, y: pdf.y, size: 8.5, color: gray)
+                pdf.y += pdf.wrapped(e.text, x: X + 70, y: pdf.y, width: W - 70, size: 8.5, color: e.bad ? CGColor(srgbRed: 0.75, green: 0.35, blue: 0.05, alpha: 1) : ink) + 3
+            }
+            if let f = o.fatal {
+                pdf.y += pdf.wrapped("Stopped for good: \(f)", x: X, y: pdf.y, width: W, size: 9, color: red) + 4
+            }
+        }
+
         if !o.scan.problems.isEmpty || !failed.isEmpty {
             pdf.y += 6
             pdf.heading("Problems", color: red)
-            for (path, why) in o.scan.problems {
+            for pr in o.scan.problems {
+                let path = pr.path, why = pr.reason
                 pdf.ensure(22)
                 pdf.text(path, x: X, y: pdf.y, size: 8.5, weight: .semibold, color: ink, width: W)
                 pdf.y += 11

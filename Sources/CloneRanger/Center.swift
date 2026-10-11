@@ -236,9 +236,11 @@ struct TransferDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 header
+                interruptedCard
+                batteryWarning
                 Card {
                     SectionLabel(text: "Transfer from")
-                    Text(t.sourceName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                    Text(t.displayName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
                     Text(t.source.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Text("\(Fmt.count(t.totalFiles, "file")) · \(Fmt.bytes(t.totalBytes))")
@@ -268,7 +270,7 @@ struct TransferDetail: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text(t.sourceName).font(.system(size: 20, weight: .bold)).foregroundStyle(T.label)
+            Text(t.displayName).font(.system(size: 20, weight: .bold)).foregroundStyle(T.label)
             Pill(text: t.label, color: t.color)
             Spacer()
             if t.state.running {
@@ -295,7 +297,7 @@ struct TransferDetail: View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "externaldrive").font(.system(size: 18)).foregroundStyle(T.label2).frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
-                Text(Fmt.volumeName(parent)).font(.system(size: 14, weight: .semibold)).foregroundStyle(T.label)
+                Text(t.volume(d)).font(.system(size: 14, weight: .semibold)).foregroundStyle(T.label)
                 Text(Fmt.shortPath(target ?? parent)).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
                     .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                 if t.state.finished {
@@ -338,6 +340,8 @@ struct TransferDetail: View {
         case .copying: return "Copied " + Fmt.partOf(d < t.snap.written.count ? t.snap.written[d] : 0, t.totalBytes)
         case .verifying: return "Verified " + Fmt.partOf(d < t.snap.verified.count ? t.snap.verified[d] : 0, t.totalBytes)
         case .retrying: return "Copying failed files again…"
+        case .rechecking: return "Re-checking what was copied…"
+        case .interrupted: return t.waitingFor.map { _ in FS.exists(t.parents[d].path) ? "Stopped" : "Unplugged" } ?? "Stopped"
         case .report: return "Writing report…"
         default: return ""
         }
@@ -348,6 +352,8 @@ struct TransferDetail: View {
             : t.state == .copying || t.state == .scanning ? ("1 · Copying", T.blue)
             : t.state == .verifying ? ("2 · Verifying", T.purple)
             : t.state == .retrying ? ("3 · Retrying \(t.retryCount)", T.blue)
+            : t.state == .rechecking ? ("Re-checking", T.purple)
+            : t.state == .interrupted ? ("Stopped", T.orange)
             : (t.label, t.color)
         let filesDone = t.state == .verifying ? (t.snap.filesVerified.max() ?? 0) : t.snap.filesCopied
         return HStack(spacing: 10) {
@@ -373,14 +379,14 @@ struct TransferDetail: View {
             Card {
                 SectionLabel(text: "Problems")
                 ForEach(Array(o.scan.problems.enumerated()), id: \.offset) { _, p in
-                    Text("\(p.0): \(p.1)").font(.system(size: 12)).foregroundStyle(T.red)
+                    Text("\(p.path): \(p.reason)").font(.system(size: 12)).foregroundStyle(T.red)
                 }
                 ForEach(bad.prefix(200), id: \.item.path) { r in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(r.item.path).font(.system(size: 12, weight: .medium)).foregroundStyle(T.label)
                         ForEach(r.errors.indices, id: \.self) { i in
                             if let e = r.errors[i] {
-                                Text("\(Fmt.volumeName(t.parents[i])): \(e)").font(.system(size: 11.5)).foregroundStyle(T.red)
+                                Text("\(t.volume(i)): \(e)").font(.system(size: 11.5)).foregroundStyle(T.red)
                             }
                         }
                     }
@@ -400,13 +406,103 @@ struct TransferDetail: View {
 }
 
 extension TransferDetail {
+    /// After an unplug (or a quit): what happened, and the ways to carry on.
+    @ViewBuilder var interruptedCard: some View {
+        if t.state == .interrupted, let job = t.job {
+            let copied = t.outcome?.copiedBytes ?? job.state.results.reduce(0) { $0 + ($1.item.kind == .file && $1.copied.contains(true) ? $1.item.size : 0) }
+            Card {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(T.orange)
+                    Text(t.interruptedBy).font(.system(size: 15, weight: .semibold)).foregroundStyle(T.label)
+                }
+                Text("\(Fmt.bytes(copied)) of \(Fmt.bytes(t.totalBytes)) was copied before it stopped. Nothing copied so far is lost, and nothing carries on until you choose.")
+                    .font(.system(size: 12.5)).foregroundStyle(T.label2)
+                if let w = t.waitingFor {
+                    Text("Plug \(w) back in to continue.")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(T.orange)
+                    HStack(spacing: 8) {
+                        if FS.exists(t.source.path) {
+                            ForEach(t.parents.indices.filter { !FS.exists(t.parents[$0].path) }, id: \.self) { d in
+                                Button("Finish Without \(t.volume(d))") { model.finishWithout(t, d) }
+                                    .buttonStyle(SecondaryButtonStyle())
+                            }
+                        }
+                        Button("Stop Here") { model.stopHere(t) }.buttonStyle(SecondaryButtonStyle(tint: T.tan))
+                    }
+                } else {
+                    let dst = job.destinationRecheckBytes
+                    if job.sourceNeedsRecheck {
+                        let full = job.recheckBytes(.full), quick = job.recheckBytes(.quick)
+                        ResumeChoice(title: "Resume Safely", primary: true,
+                                     detail: "Re-reads all \(Fmt.bytes(full)) already copied from \(t.displayName) and re-checks the copies · \(estimate(full, dst))") {
+                            model.resume(t, .full)
+                        }
+                        ResumeChoice(title: "Quick Check & Resume", primary: false,
+                                     detail: "Checks names, sizes and dates, plus a \(Fmt.bytes(quick)) sample from \(t.displayName), and re-checks the copies · \(estimate(quick, dst))") {
+                            model.resume(t, .quick)
+                        }
+                    } else {
+                        ResumeChoice(title: "Resume", primary: true,
+                                     detail: "Re-checks the \(Fmt.bytes(dst)) already on the destinations, then copies the rest · \(estimate(0, dst))") {
+                            model.resume(t, .full)
+                        }
+                    }
+                    Button("Stop Here") { model.stopHere(t) }.buttonStyle(SecondaryButtonStyle(tint: T.tan))
+                }
+                firstAidNote
+            }
+        } else {
+            firstAidNote
+        }
+    }
+
+    /// Source and destinations are re-checked at the same time, so the slower of the two sets the time.
+    private func estimate(_ src: Int64, _ dst: Int64) -> String {
+        let speed = avgCopySpeed ?? 300_000_000
+        let perDrive = Double(dst) / Double(max(1, t.parents.count))
+        return "about " + Fmt.duration(max(Double(src), perDrive) / speed + 5)
+    }
+
+    private var avgCopySpeed: Double? {
+        guard let o = t.outcome, o.copiedBytes > 0 else { return nil }
+        let s = o.copyFinished.timeIntervalSince(o.copyStarted)
+        return s > 1 ? Double(o.copiedBytes) / s : nil
+    }
+
+    /// A drive yanked mid-write can have a damaged file index, not just a half-written file.
+    @ViewBuilder var firstAidNote: some View {
+        let yanked = (t.outcome?.events ?? []).filter { $0.bad && $0.text.contains("disappeared") && !$0.text.hasPrefix(t.displayName) }
+        if !yanked.isEmpty {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "stethoscope").foregroundStyle(T.amber)
+                Text("A destination drive was unplugged while it was being written. Before trusting that drive, run First Aid on it in Disk Utility.")
+                    .font(.system(size: 12)).foregroundStyle(T.label2)
+                Spacer()
+                Button("Open Disk Utility") {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Disk Utility.app"))
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+        }
+    }
+
+    @ViewBuilder var batteryWarning: some View {
+        if t.state.running && Power.onBattery {
+            HStack(spacing: 8) {
+                Image(systemName: "battery.50").foregroundStyle(T.amber)
+                Text("Running on battery. Closing the lid will put the Mac to sleep and stop the transfer; plug in power for long transfers.")
+                    .font(.system(size: 12)).foregroundStyle(T.label2)
+            }
+        }
+    }
+
     /// "Show CLIP Unverified" for each destination that has one.
     @ViewBuilder var unverifiedButtons: some View {
         HStack(spacing: 8) {
             ForEach(t.targetPaths.indices, id: \.self) { d in
                 let folder = Engine.unverifiedFolder(forTarget: t.targetPaths[d])
                 if FS.exists(folder) {
-                    Button("Show \((folder as NSString).lastPathComponent) on \(Fmt.volumeName(t.parents[d]))") {
+                    Button("Show \((folder as NSString).lastPathComponent) on \(t.volume(d))") {
                         NSWorkspace.shared.activateFileViewerSelecting([ReportWriter.exactURL(folder)])
                     }
                     .buttonStyle(SecondaryButtonStyle(tint: T.amber))
@@ -433,13 +529,34 @@ extension TransferDetail {
                             Text(r.item.path).font(.system(size: 12, weight: .medium)).foregroundStyle(T.label)
                             ForEach(r.firstError.indices, id: \.self) { i in
                                 if let e = r.firstError[i] {
-                                    Text("\(Fmt.volumeName(t.parents[i])) first try: \(e)").font(.system(size: 11.5)).foregroundStyle(T.amber)
+                                    Text("\(t.volume(i)) first try: \(e)").font(.system(size: 11.5)).foregroundStyle(T.amber)
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/// A big resume button with a line saying what it will do and how long it should take.
+struct ResumeChoice: View {
+    let title: String
+    let primary: Bool
+    let detail: String
+    let action: () -> Void
+    var body: some View {
+        HStack(spacing: 12) {
+            if primary {
+                Button(action: action) { Label(title, systemImage: "play.fill").frame(minWidth: 190) }
+                    .buttonStyle(PrimaryButtonStyle(large: true))
+            } else {
+                Button(action: action) { Label(title, systemImage: "hare").frame(minWidth: 190) }
+                    .buttonStyle(SecondaryButtonStyle())
+            }
+            Text(detail).font(.system(size: 12)).foregroundStyle(T.label2).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
     }
 }

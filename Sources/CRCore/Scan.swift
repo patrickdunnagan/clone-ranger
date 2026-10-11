@@ -22,17 +22,22 @@ public final class JobControl: @unchecked Sendable {
 }
 
 /// One thing inside the source folder, path relative to the source folder ("" is never used).
-public struct SourceItem: Sendable, Hashable {
-    public enum Kind: Sendable { case folder, file, link }
+public struct SourceItem: Sendable, Hashable, Codable {
+    public enum Kind: String, Sendable, Codable { case folder, file, link }
     public var path: String
     public var kind: Kind
     public var size: Int64
     public var modified: Date?
 }
 
-public struct ScanResult: Sendable {
+public struct ScanProblem: Sendable, Codable, Hashable {
+    public var path: String
+    public var reason: String
+}
+
+public struct ScanResult: Sendable, Codable {
     public var items: [SourceItem]
-    public var problems: [(String, String)]   // (path, reason) for folders that couldn't be read
+    public var problems: [ScanProblem]        // folders or files that couldn't be read
     public var skipped: Int                   // system files left out (.DS_Store, Spotlight, Trash…)
     public var files: Int { items.filter { $0.kind != .folder }.count }
     public var bytes: Int64 { items.reduce(0) { $0 + ($1.kind == .file ? $1.size : 0) } }
@@ -56,12 +61,12 @@ public enum Scanner {
 
     public static func scan(path root: String) -> ScanResult {
         var items: [SourceItem] = []
-        var problems: [(String, String)] = []
+        var problems: [ScanProblem] = []
         var skipped = 0
         func walk(_ rel: String) {
             let dir = FS.join(root, rel)
             guard let d = opendir(dir) else {
-                problems.append((rel.isEmpty ? "(the source folder)" : rel, "Couldn't read this folder: \(FS.errorText())"))
+                problems.append(ScanProblem(path: rel.isEmpty ? "(the source folder)" : rel, reason: "Couldn't read this folder: \(FS.errorText())"))
                 return
             }
             var names: [String] = []
@@ -79,7 +84,7 @@ public enum Scanner {
                 if isSystem(name) { skipped += 1; continue }
                 let r = rel.isEmpty ? name : rel + "/" + name
                 guard let st = FS.lstatInfo(FS.join(root, r)) else {
-                    problems.append((r, "Couldn't read: \(FS.errorText())"))
+                    problems.append(ScanProblem(path: r, reason: "Couldn't read: \(FS.errorText())"))
                     continue
                 }
                 let mtime = Date(timeIntervalSince1970: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)
@@ -92,7 +97,7 @@ public enum Scanner {
                 case S_IFREG:
                     items.append(SourceItem(path: r, kind: .file, size: Int64(st.st_size), modified: mtime))
                 default:
-                    problems.append((r, "Not a regular file (device, socket or pipe); left out"))
+                    problems.append(ScanProblem(path: r, reason: "Not a regular file (device, socket or pipe); left out"))
                 }
             }
         }
@@ -134,6 +139,11 @@ public enum Plan {
             }
         }
         return want
+    }
+
+    /// "HVP SSD 07", or "Macintosh HD" for the Mac's own drive.
+    public static func volumeName(_ url: URL) -> String {
+        (try? url.resourceValues(forKeys: [.volumeLocalizedNameKey]))?.volumeLocalizedName ?? "Macintosh HD"
     }
 
     public static func freeSpace(_ url: URL) -> Int64? {

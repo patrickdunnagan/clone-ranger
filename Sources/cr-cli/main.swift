@@ -38,6 +38,7 @@ guard args.count >= 2 else {
     exit(2)
 }
 let env = ProcessInfo.processInfo.environment
+if let mb = env["CR_THROTTLE"].flatMap(Double.init) { MultiCopy.throttle = mb * 1_000_000 }
 if env["CR_SOURCE_NOCACHE"] != nil { MultiCopy.sourceCached = false }
 if let mb = env["CR_CHUNK_MB"].flatMap(Int.init) { MultiCopy.copyChunk = mb << 20 }
 if env["CR_DEST_CACHED"] != nil { MultiCopy.destCached = true }
@@ -54,9 +55,32 @@ let t0 = Date()
 var stageTimes: [String] = []
 if env["CR_TEST_CORRUPT"] != nil { Engine.corruptForTest = true }
 if env["CR_TEST_CORRUPT_ALWAYS"] != nil { Engine.corruptForTest = true; Engine.corruptAlwaysForTest = true }
-let out = Engine.run(source: args[0], targets: targets, control: JobControl(), progress: progress) { s in
+let job = TransferJob(source: args[0], targets: targets, control: JobControl(), progress: progress) { s in
     stageTimes.append("\(s) at \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
 }
+var out = job.start()
+var current = job
+// Unplug tests: wait for whatever went away to come back, then resume (CR_RESUME=full|quick).
+while out.interrupted {
+    print("INTERRUPTED: copied \(out.copiedBytes) bytes; waiting for", current.waitingFor() ?? "nothing")
+    while current.waitingFor() != nil { Thread.sleep(forTimeInterval: 0.5) }
+    Thread.sleep(forTimeInterval: 1)
+    if env["CR_VIA_STATE"] != nil {
+        // Imitate a quit: save the state, rebuild the job from it.
+        let data = try JSONEncoder().encode(current.state)
+        print("state file \(data.count) bytes")
+        current = TransferJob(state: try JSONDecoder().decode(JobState.self, from: data), control: JobControl(),
+                              progress: progress, stage: current.stage)
+    }
+    let mode: ResumeMode = env["CR_RESUME"] == "quick" ? .quick : .full
+    print("RESUME \(mode): source re-check \(current.recheckBytes(mode)) bytes, destinations \(current.destinationRecheckBytes) bytes")
+    let tr = Date()
+    out = current.resume(mode)
+    let p = progress.snapshot
+    print(String(format: "resume took %.1fs (source re-read %lld, dest re-read %lld)", Date().timeIntervalSince(tr), p.recheckSourceDone, p.recheckDestDone))
+}
+for e in out.events { print("EVENT:", e.text) }
+if let f = out.fatal { print("FATAL:", f) }
 let s = out.scan
 let copy = out.copyFinished.timeIntervalSince(out.copyStarted)
 let verify = out.verifyFinished.timeIntervalSince(out.copyFinished)

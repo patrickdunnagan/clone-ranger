@@ -12,15 +12,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
+            
             guard let m = model, m.busy || !m.queued.isEmpty, ProcessInfo.processInfo.environment["CR_AUTOPLAY"] == nil else {
                 return .terminateNow
             }
             let alert = NSAlert()
             alert.messageText = "A transfer is still running."
-            alert.informativeText = "Quitting stops it and clears the queue. The copy in progress won't be verified or get a report. Nothing on the source is touched."
+            alert.informativeText = "Quitting stops it and clears the queue. Next time you open Clone Ranger it offers to pick up where it left off, after re-checking the card and what was copied. Nothing on the source is touched."
             alert.addButton(withTitle: "Keep Running")
             alert.addButton(withTitle: "Quit")
-            return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+            for t in m.active where t.state != .report { Journal.saveNow(t) }
+            return .terminateNow
         }
     }
 }
@@ -38,6 +41,7 @@ struct CloneRangerApp: App {
                 .frame(minWidth: 1100, minHeight: 680)
                 .onAppear {
                     delegate.model = model
+                    model.loadUnfinished()
                     Autoplay.startIfAsked(model: model)
                 }
         }

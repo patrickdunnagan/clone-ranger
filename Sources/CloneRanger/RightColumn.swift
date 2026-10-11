@@ -8,6 +8,7 @@ struct RightColumn: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 section("Active", model.active)
+                section("Stopped", model.interrupted)
                 section("Queued", model.queued)
                 section("History", model.history)
                 if model.transfers.isEmpty {
@@ -43,7 +44,7 @@ struct TransferRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text(t.sourceName)
+                Text(t.displayName)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(T.label)
                     .lineLimit(1)
@@ -88,6 +89,10 @@ struct TransferRow: View {
             parts.append(drives)
             if let s = t.secondsLeft { parts.append("~" + Fmt.duration(s)) }
             return parts.joined(separator: " · ")
+        case .interrupted:
+            return t.waitingFor.map { "Waiting for \($0) · " + Fmt.bytes(t.outcome?.copiedBytes ?? 0) + " copied" } ?? "Ready to resume · choose how"
+        case .rechecking:
+            return "\(Int((t.fraction * 100).rounded(.down)))% re-checked · " + drives
         case .retrying:
             return "Copying \(Fmt.count(t.retryCount, "failed file")) again · " + drives
         case .report:
