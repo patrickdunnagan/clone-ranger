@@ -441,6 +441,7 @@ final class AppModel: ObservableObject {
 
     /// Transfers left unfinished last time Clone Ranger ran.
     func loadUnfinished() {
+        guard Journal.claim() else { return }   // another Clone Ranger is running and owns them
         for (id, st) in Journal.loadAll() where !transfers.contains(where: { $0.id == id }) {
             let t = Transfer(unfinished: st, id: id)
             t.waitingFor = t.job?.waitingFor()

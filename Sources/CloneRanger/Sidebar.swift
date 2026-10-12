@@ -141,6 +141,7 @@ struct FolderRow: View {
                     .foregroundStyle(T.label)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .layoutPriority(1)   // the name wins over the free-space label when space is tight
                 Spacer(minLength: 4)
                 if let free = place?.free, place?.kind != .home {
                     Text("\(Fmt.bytes(free)) free")

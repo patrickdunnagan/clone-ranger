@@ -33,6 +33,18 @@ enum Journal {
         try? FileManager.default.removeItem(at: folder.appendingPathComponent(t.id.uuidString + ".json"))
     }
 
+    /// Only one running Clone Ranger may pick up unfinished transfers: the first to start holds this lock
+    /// for as long as it runs, so a second copy never shows (or resumes) the first one's work in progress.
+    nonisolated(unsafe) private static var lockFD: Int32 = -1
+    static func claim() -> Bool {
+        if lockFD >= 0 { return true }
+        let fd = open(folder.appendingPathComponent(".lock").path, O_RDWR | O_CREAT, 0o644)
+        guard fd >= 0 else { return false }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 { close(fd); return false }
+        lockFD = fd
+        return true
+    }
+
     static func loadAll() -> [(UUID, JobState)] {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         return files.compactMap { f in

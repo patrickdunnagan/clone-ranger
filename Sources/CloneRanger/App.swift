@@ -38,7 +38,7 @@ struct CloneRangerApp: App {
             RootView()
                 .environmentObject(model)
                 .environmentObject(places)
-                .frame(minWidth: 1100, minHeight: 680)
+                .frame(minWidth: 1000, minHeight: 640)
                 .onAppear {
                     delegate.model = model
                     model.loadUnfinished()
@@ -68,12 +68,19 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar()
-            HStack(spacing: 0) {
-                Sidebar().frame(width: 260)
-                Divider().overlay(T.sep)
-                CenterColumn().frame(minWidth: 520)
-                Divider().overlay(T.sep)
-                RightColumn().frame(width: 370)
+            // Side columns give up width in proportion as the window narrows (down to a minimum), so
+            // nothing overlaps; the middle keeps the rest.
+            GeometryReader { g in
+                let left = min(260, max(200, g.size.width * 0.19))
+                let right = min(370, max(290, g.size.width * 0.27))
+                HStack(spacing: 0) {
+                    Sidebar().frame(width: left)
+                    Divider().overlay(T.sep)
+                    CenterColumn().frame(maxWidth: .infinity)
+                    Divider().overlay(T.sep)
+                    RightColumn().frame(width: right)
+                }
+                .frame(width: g.size.width, height: g.size.height)
             }
         }
         .background(T.bg)

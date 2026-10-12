@@ -34,6 +34,13 @@ enum Autoplay {
 
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.5))
+            // Test: CR_WINDOW_WIDTH=<points> to check the layout when the window is narrow.
+            if let w = env["CR_WINDOW_WIDTH"].flatMap(Double.init), let win = NSApp.windows.first(where: { $0.isVisible }) {
+                var f = win.frame
+                f.size.width = w
+                win.setFrame(f, display: true)
+                try? await Task.sleep(for: .seconds(0.5))
+            }
             snap(dir, "1 empty")
             model.setSource(parts[0])
             for d in parts.dropFirst() { model.addDestination(d) }

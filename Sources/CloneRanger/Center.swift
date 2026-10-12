@@ -319,7 +319,7 @@ struct TransferDetail: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 5) {
                 Bar(fraction: t.destinationFraction(d), color: barColor(d))
-                    .frame(width: 230)
+                    .frame(minWidth: 110, maxWidth: 230)
                 Text(barText(d)).font(.system(size: 11.5)).foregroundStyle(T.label2)
             }
         }
