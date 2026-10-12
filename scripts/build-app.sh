@@ -64,7 +64,7 @@ STAGE=$(mktemp -d)
 ditto "$APP" "$STAGE/$NAME.app"
 cp THIRD-PARTY.md "$STAGE/Third-party software (read me).md"
 cp Vendor/FFmpeg/LICENSE-FFmpeg-LGPLv2.1.txt "$STAGE/"
-ditto -c -k "$STAGE" "$ZIP"
+ditto -c -k --norsrc --noextattr "$STAGE" "$ZIP"
 rm -rf "$STAGE"
 # Keep only the 5 newest builds.
 ls -t dist/*.zip | tail -n +6 | while read -r old; do rm -f "$old"; done
