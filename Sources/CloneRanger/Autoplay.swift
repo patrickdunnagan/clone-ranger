@@ -8,6 +8,16 @@ import CRCore
 enum Autoplay {
     static func startIfAsked(model: AppModel) {
         let env = ProcessInfo.processInfo.environment
+        // CR_PREFILL="<source>|<dest>…": fill in a transfer but leave starting it to the person.
+        if let spec = env["CR_PREFILL"] {
+            let parts = spec.split(separator: "|").map { URL(fileURLWithPath: String($0)) }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1))
+                model.setSource(parts[0])
+                for d in parts.dropFirst() { model.addDestination(d) }
+            }
+            return
+        }
         if env["CR_AUTOPLAY"] == nil, let mode = env["CR_AUTOPLAY_REOPEN"] {
             // Test: opened after a crash; show what's offered, resume, wait for the end.
             let dir = URL(fileURLWithPath: env["CR_SNAP_DIR"] ?? NSTemporaryDirectory())
