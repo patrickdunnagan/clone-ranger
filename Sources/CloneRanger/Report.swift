@@ -75,7 +75,8 @@ enum ReportWriter {
             let path = reportPath(target: target, date: now, ext: "pdf")
             do {
                 try FS.makeFolders((path as NSString).deletingLastPathComponent)
-                try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path), compactClips: compactClips)
+                try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path), compactClips: compactClips,
+                             clipsAcross: Int(ProcessInfo.processInfo.environment["CR_CLIPS_ACROSS"] ?? "") ?? 5)
                 if csv { try writeCSV(d, to: exactURL(String(path.dropLast(4)) + ".csv")) }
                 urls.append(exactURL(path))
             } catch {
@@ -100,7 +101,7 @@ enum ReportWriter {
     // MARK: PDF
 
     static func writePDF(_ d: ReportData, stills: [String: FrameGrab.Still], thisDestination: Int, date: Date, to url: URL,
-                         compactClips: Bool = true) throws {
+                         compactClips: Bool = true, clipsAcross: Int = 5) throws {
         let pdf = PDFBuilder(url: url, footer: "Clone Ranger \(appVersion) · \(d.sourceName)")
         guard let pdf else { throw CocoaError(.fileWriteUnknown) }
         let o = d.outcome
@@ -253,39 +254,36 @@ enum ReportWriter {
         if !clips.isEmpty && compactClips {
             pdf.y += 8
             pdf.heading("Clips (\(clips.count))", color: ink)
-            let colGap: CGFloat = 18, cw = (W - colGap) / 2
-            let tw: CGFloat = 100, th = tw * 9 / 16, pairGap: CGFloat = 4, textGap: CGFloat = 8
-            func height(_ r: ItemResult) -> CGFloat { stills[r.item.path]?.middle != nil ? th + 36 : max(th, 36) }
-            for i in stride(from: 0, to: clips.count, by: 2) {
-                let row = Array(clips[i..<min(i + 2, clips.count)])
-                let rowH = row.map(height).max() ?? th
-                pdf.ensure(rowH + 4)
-                for (c, r) in row.enumerated() {
-                    let x = X + CGFloat(c) * (cw + colGap), y = pdf.y
-                    let s = stills[r.item.path]
-                    let ext = (r.item.path as NSString).pathExtension.lowercased()
-                    let ok = !r.errors.contains { $0 != nil }
-                    let name = (ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent
-                    drawFrame(s?.image, x: x, y: y, w: tw, h: th, ext: ext)
-                    if s?.middle != nil {
-                        // Two frames side by side, details underneath.
-                        drawFrame(s?.middle, x: x + tw + pairGap, y: y, w: tw, h: th, ext: ext)
-                        for (n, t) in (s?.times ?? []).prefix(2).enumerated() {
-                            timeTag((n == 0 ? "Start " : "Middle ") + Fmt.timecode(t), x: x + CGFloat(n) * (tw + pairGap), y: y + th, w: tw, small: true)
-                        }
-                        pdf.text(name, x: x, y: y + th + 4, size: 8, weight: .semibold, color: ok ? ink : red, width: cw)
-                        pdf.text(meta(r, s), x: x, y: y + th + 15, size: 7, color: gray, width: cw)
-                        pdf.text(r.hash ?? "", x: x, y: y + th + 25, size: 6.5, color: gray, width: cw, mono: true)
-                    } else {
-                        // One frame, details beside it.
-                        let tx = x + tw + textGap, w = cw - tw - textGap
-                        pdf.text(name, x: tx, y: y + 2, size: 8, weight: .semibold, color: ok ? ink : red, width: w)
-                        pdf.text(meta(r, s), x: tx, y: y + 14, size: 7, color: gray, width: w)
-                        pdf.text(r.hash ?? "", x: tx, y: y + 25, size: 6.5, color: gray, width: w, mono: true)
+            // Small frames in a grid, name and details under each; a long clip's two frames take two places.
+            let perRow = clipsAcross, gap: CGFloat = 12, pairGap: CGFloat = 3
+            let cell = (W - gap * CGFloat(perRow - 1)) / CGFloat(perRow)
+            let tw = min(88, cell), th = tw * 9 / 16, textH: CGFloat = 30, tile = th + textH
+            var col = 0
+            for r in clips {
+                let s = stills[r.item.path]
+                let span = s?.middle != nil && perRow > 1 ? 2 : 1
+                if col + span > perRow { pdf.y += tile + 8; col = 0 }
+                if col == 0 { pdf.ensure(tile + 4) }
+                let x = X + CGFloat(col) * (cell + gap), y = pdf.y
+                let w = CGFloat(span) * cell + CGFloat(span - 1) * gap
+                let ext = (r.item.path as NSString).pathExtension.lowercased()
+                drawFrame(s?.image, x: x, y: y, w: tw, h: th, ext: ext)
+                if span == 2 {
+                    drawFrame(s?.middle, x: x + tw + pairGap, y: y, w: tw, h: th, ext: ext)
+                    for (n, t) in (s?.times ?? []).prefix(2).enumerated() {
+                        timeTag((n == 0 ? "Start " : "Middle ") + Fmt.timecode(t), x: x + CGFloat(n) * (tw + pairGap), y: y + th, w: tw, small: true)
                     }
                 }
-                pdf.y += rowH + 10
+                let ok = !r.errors.contains { $0 != nil }
+                let textW = max(span == 2 ? tw * 2 + pairGap : tw, min(w, tw * 1.6))
+                pdf.text((ok ? "" : "✗ ") + (r.item.path as NSString).lastPathComponent, x: x, y: y + th + 3, size: 7, weight: .semibold,
+                         color: ok ? ink : red, width: textW, truncateMiddle: true)
+                pdf.text(meta(r, s), x: x, y: y + th + 13, size: 6.1, color: gray, width: textW)
+                pdf.text(r.hash ?? "", x: x, y: y + th + 21.5, size: 5.7, color: gray, width: textW, mono: true)
+                col += span
+                if col >= perRow { pdf.y += tile + 8; col = 0 }
             }
+            if col > 0 { pdf.y += tile + 8 }
         } else if !clips.isEmpty {
             pdf.y += 8
             pdf.heading("Clips (\(clips.count))", color: ink)
@@ -317,40 +315,41 @@ enum ReportWriter {
             if col > 0 { pdf.y += tile }
         }
 
-        // One table for every file: name, size, the folder it's in (the same inside every copy, since the
-        // source is recreated exactly), its checksum, and a ✓ per destination drive.
-        let tableRows = files.sorted { $0.item.path.localizedStandardCompare($1.item.path) == .orderedAscending }
-        let n = d.targets.count
-        let sizeW: CGFloat = 46, hashW: CGFloat = 74, statusW: CGFloat = min(54, max(40, (W - 300) / CGFloat(max(n, 1)) - 2))
-        let rest = W - sizeW - hashW - statusW * CGFloat(n)
-        let fileW = (rest * 0.52).rounded(), folderW = rest - fileW
-        let cols: [CGFloat] = [X, X + fileW, X + fileW + sizeW, X + fileW + sizeW + folderW, X + fileW + sizeW + folderW + hashW]
-        let rowH: CGFloat = 10.5, pad: CGFloat = 3
-        let lineColor = CGColor(gray: 0.82, alpha: 1), zebra = CGColor(gray: 0.955, alpha: 1)
         let greenTick = CGColor(srgbRed: 0.13, green: 0.55, blue: 0.38, alpha: 1)
-        // Drive names for the column headers; the same drive twice gets "(2)".
-        var heads: [String] = []
-        for t in d.targets {
-            let v = volumeName(ofTarget: t)
-            let same = heads.filter { $0 == v || $0.hasPrefix(v + " (") }.count
-            heads.append(same == 0 ? v : "\(v) (\(same + 1))")
+        // One table for every file: name, size, checksum, then where it landed on each drive (the last few
+        // folders of the path, ✓ when it was read back and matched there).
+        let tableRows = files.sorted { $0.item.path.localizedStandardCompare($1.item.path) == .orderedAscending }
+        let n = max(d.targets.count, 1)
+        let sizeW: CGFloat = 40, hashW: CGFloat = 66
+        let fileW: CGFloat = n >= 3 ? 104 : 130
+        let destW = (W - fileW - sizeW - hashW) / CGFloat(n)
+        let colX: [CGFloat] = [X, X + fileW, X + fileW + sizeW, X + fileW + sizeW + hashW]
+        let rowH: CGFloat = 10.5, pad: CGFloat = 3, font: CGFloat = 6.4
+        let blue = CGColor(srgbRed: 0.22, green: 0.47, blue: 0.84, alpha: 1)        // the logo's folder blue
+        let tint = CGColor(srgbRed: 0.13, green: 0.55, blue: 0.38, alpha: 0.07)    // a whisper of "verified" green
+        let rule = CGColor(srgbRed: 0.13, green: 0.55, blue: 0.38, alpha: 0.22)
+        let white = CGColor(gray: 1, alpha: 1)
+        func trimmed(_ folder: String, keep: Int = 4) -> String {
+            let parts = folder.split(separator: "/", omittingEmptySubsequences: true)
+            return parts.count <= keep ? folder : "…/" + parts.suffix(keep).joined(separator: "/")
         }
         func header() {
-            pdf.box(x: X, y: pdf.y, w: W, h: rowH + 3, color: CGColor(gray: 0.88, alpha: 1))
-            let labels = ["File", "Size", "Folder in the copy", "xxHash64"]
-            for (i, l) in labels.enumerated() {
-                pdf.text(l, x: cols[i] + pad, y: pdf.y + 2.5, size: 6.8, weight: .semibold, color: ink, width: (i < 4 ? (cols[min(i + 1, 4)] - cols[i]) : hashW) - pad * 2)
+            pdf.box(x: X, y: pdf.y, w: W, h: rowH + 4, color: blue)
+            for (i, l) in ["File", "Size", "xxHash64"].enumerated() {
+                pdf.text(l, x: colX[i] + pad, y: pdf.y + 3, size: 6.8, weight: .semibold, color: white, width: (colX[i + 1] - colX[i]) - pad * 2)
             }
-            for (k, h) in heads.enumerated() {
-                pdf.text(h, x: cols[4] + CGFloat(k) * statusW + 1, y: pdf.y + 2.5, size: 6.3, weight: .semibold, color: ink,
-                         width: statusW - 2, center: true)
+            for (k, t) in d.targets.enumerated() {
+                // Drive name plus the folder the copy went into, so two copies on one drive are told apart.
+                let label = volumeName(ofTarget: t) + " › " + ((t as NSString).deletingLastPathComponent as NSString).lastPathComponent
+                pdf.text(label, x: colX[3] + CGFloat(k) * destW + pad, y: pdf.y + 3, size: 6.8, weight: .semibold, color: white,
+                         width: destW - pad * 2)
             }
-            pdf.y += rowH + 3
+            pdf.y += rowH + 4
         }
         pdf.y += 8
         pdf.ensure(80)
         pdf.heading("Files and where they went (\(tableRows.count))", color: ink)
-        pdf.y += pdf.wrapped("Every file is recreated in the same folder inside each copy. ✓ = copied and read back with a matching checksum on that drive. Drive paths are listed under Destinations above.",
+        pdf.y += pdf.wrapped("✓ = copied and read back with a matching checksum on that drive. Each drive's full path is under Destinations above.",
                              x: X, y: pdf.y, width: W, size: 7.5, color: gray) + 4
         header()
         var page = pdf.pageNumber
@@ -358,23 +357,23 @@ enum ReportWriter {
             pdf.ensure(rowH)
             if pdf.pageNumber != page { page = pdf.pageNumber; header() }
             let y = pdf.y
-            if i % 2 == 1 { pdf.box(x: X, y: y, w: W, h: rowH, color: zebra) }
+            if i % 2 == 1 { pdf.box(x: X, y: y, w: W, h: rowH, color: tint) }
             let ok = !r.errors.contains { $0 != nil }
-            let folder = (r.item.path as NSString).deletingLastPathComponent
-            pdf.text((r.item.path as NSString).lastPathComponent, x: cols[0] + pad, y: y + 2, size: 6.8, color: ok ? ink : red, width: fileW - pad * 2, truncateMiddle: true)
-            pdf.text(r.item.kind == .link ? "link" : Fmt.bytes(r.item.size), x: cols[1] + pad, y: y + 2, size: 6.8, color: ink, width: sizeW - pad * 2)
-            pdf.text(folder.isEmpty ? "(top level)" : folder, x: cols[2] + pad, y: y + 2, size: 6.8, color: gray, width: folderW - pad * 2, truncateMiddle: true)
-            pdf.text(r.hash ?? "—", x: cols[3] + pad, y: y + 2, size: 6.3, color: ok ? gray : red, width: hashW - pad * 2, mono: true)
-            for k in 0..<n {
+            pdf.text((r.item.path as NSString).lastPathComponent, x: colX[0] + pad, y: y + 2.2, size: font, color: ok ? ink : red, width: fileW - pad * 2, truncateMiddle: true)
+            pdf.text(r.item.kind == .link ? "link" : Fmt.bytes(r.item.size), x: colX[1] + pad, y: y + 2.2, size: font, color: ink, width: sizeW - pad * 2)
+            pdf.text(r.hash ?? "—", x: colX[2] + pad, y: y + 2.4, size: 5.9, color: ok ? gray : red, width: hashW - pad * 2, mono: true)
+            for (k, t) in d.targets.enumerated() {
+                let x = colX[3] + CGFloat(k) * destW
                 let unused = k < o.destinationProblems.count && o.destinationProblems[k] != nil
-                let mark = unused ? "—" : r.errors[k] == nil ? "✓" : "✗"
-                pdf.text(mark, x: cols[4] + CGFloat(k) * statusW, y: y + 1.5, size: 7.5, weight: .bold,
-                         color: unused ? gray : r.errors[k] == nil ? greenTick : red, width: statusW, center: true)
+                let good = !unused && r.errors[k] == nil
+                pdf.text(unused ? "—" : good ? "✓" : "✗", x: x + pad, y: y + 1.8, size: 7, weight: .bold,
+                         color: unused ? gray : good ? greenTick : red, width: 9)
+                let where_ = unused ? "drive not used" : good ? trimmed((FS.join(t, r.item.path) as NSString).deletingLastPathComponent)
+                    : "not copied (see Problems)"
+                pdf.text(where_, x: x + pad + 9, y: y + 2.2, size: font, color: good ? ink : unused ? gray : red,
+                         width: destW - pad * 2 - 9, truncateStart: true)
             }
-            pdf.line(x1: X, y1: y + rowH, x2: X + W, y2: y + rowH, color: lineColor)
-            for cx in cols.dropFirst() + (1..<max(n, 1)).map({ cols[4] + CGFloat($0) * statusW }) {
-                pdf.line(x1: cx, y1: y, x2: cx, y2: y + rowH, color: lineColor)
-            }
+            pdf.line(x1: X, y1: y + rowH, x2: X + W, y2: y + rowH, color: rule)
             pdf.y += rowH
         }
         pdf.y += 6
@@ -461,12 +460,13 @@ final class PDFBuilder {
 
     /// One line, top at `y`, cut with "…" to fit `width`.
     func text(_ s: String, x: CGFloat, y: CGFloat, size: CGFloat, weight: NSFont.Weight = .regular, color: CGColor,
-              width: CGFloat? = nil, mono: Bool = false, center: Bool = false, alignRight: Bool = false, truncateMiddle: Bool = false) {
+              width: CGFloat? = nil, mono: Bool = false, center: Bool = false, alignRight: Bool = false, truncateMiddle: Bool = false,
+              truncateStart: Bool = false) {
         let a = attributed(s, size: size, weight: weight, color: color, mono: mono)
         var line = CTLineCreateWithAttributedString(a)
         if let width {
             let token = CTLineCreateWithAttributedString(attributed("…", size: size, weight: weight, color: color, mono: mono))
-            if let t = CTLineCreateTruncatedLine(line, Double(width), truncateMiddle ? .middle : .end, token) { line = t }
+            if let t = CTLineCreateTruncatedLine(line, Double(width), truncateStart ? .start : truncateMiddle ? .middle : .end, token) { line = t }
         }
         let lineW = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         var dx: CGFloat = 0
