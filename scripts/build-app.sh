@@ -29,6 +29,12 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/"
 mkdir -p "$APP/Contents/Frameworks"
 [[ -d Vendor/BlackmagicRAW/BlackmagicRawAPI.framework ]] && ditto Vendor/BlackmagicRAW/BlackmagicRawAPI.framework "$APP/Contents/Frameworks/BlackmagicRawAPI.framework"
 [[ -f Vendor/RED/Redistributable/REDR3D.dylib ]] && cp Vendor/RED/Redistributable/REDR3D.dylib "$APP/Contents/Frameworks/"
+# Small LGPL FFmpeg for frames from clips macOS can't open (scripts/build-ffmpeg.sh), plus licenses.
+[[ -f Vendor/FFmpeg/ffmpeg-cr ]] || scripts/build-ffmpeg.sh
+cp Vendor/FFmpeg/ffmpeg-cr "$APP/Contents/MacOS/"
+codesign --force -s - "$APP/Contents/MacOS/ffmpeg-cr"
+mkdir -p "$APP/Contents/Resources/Licenses"
+cp THIRD-PARTY.md Vendor/FFmpeg/LICENSE-FFmpeg-LGPLv2.1.txt "$APP/Contents/Resources/Licenses/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -53,7 +59,13 @@ codesign --force -s - "$APP"
 mkdir -p dist
 ZIP="dist/$NAME $VERSION.zip"
 rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
+# The zip carries the third-party notice next to the app too.
+STAGE=$(mktemp -d)
+ditto "$APP" "$STAGE/$NAME.app"
+cp THIRD-PARTY.md "$STAGE/Third-party software (read me).md"
+cp Vendor/FFmpeg/LICENSE-FFmpeg-LGPLv2.1.txt "$STAGE/"
+ditto -c -k "$STAGE" "$ZIP"
+rm -rf "$STAGE"
 # Keep only the 5 newest builds.
 ls -t dist/*.zip | tail -n +6 | while read -r old; do rm -f "$old"; done
 echo "Built $ZIP ($(du -h "$ZIP" | cut -f1))"

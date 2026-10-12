@@ -154,7 +154,74 @@ enum FrameGrab {
                 out.times = [t]
             }
         }
+        // Formats the Mac can't open itself (Sony XAVC MXF and others): the small bundled FFmpeg.
+        if out.image == nil, ffmpegPath != nil, videoExtensions.contains(e) {
+            let f = await Task.detached { ffmpegStill(url.path) }.value
+            if f.image != nil { return f }
+            if out.duration == nil { out.duration = f.duration; out.dimensions = f.dimensions }
+        }
         if out.image == nil { out.image = sonyThumbnail(for: url); out.middle = nil; out.times = [] }
+        return out
+    }
+
+    /// The bundled FFmpeg (Contents/MacOS/ffmpeg-cr), or the vendored one when developing.
+    static let ffmpegPath: String? = {
+        let dev = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Vendor/FFmpeg/ffmpeg-cr").path
+        return [Bundle.main.path(forAuxiliaryExecutable: "ffmpeg-cr"), dev].compactMap { $0 }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }()
+
+    /// Runs FFmpeg with a time limit; returns (stdout, stderr).
+    static func runFFmpeg(_ args: [String], timeout: Double = 20) -> (Data, String) {
+        guard let ff = ffmpegPath else { return (Data(), "") }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: ff)
+        p.arguments = ["-hide_banner", "-nostdin"] + args
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        guard (try? p.run()) != nil else { return (Data(), "") }
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+        var data = Data(), errData = Data()
+        let g = DispatchGroup()
+        g.enter(); DispatchQueue.global().async { errData = err.fileHandleForReading.readDataToEndOfFile(); g.leave() }
+        data = out.fileHandleForReading.readDataToEndOfFile()
+        g.wait()
+        p.waitUntilExit()
+        killer.cancel()
+        return (data, String(decoding: errData, as: UTF8.self))
+    }
+
+    /// Length and size from FFmpeg's description of the file, then the same frames as any other clip.
+    static func ffmpegStill(_ path: String) -> Still {
+        var out = Still()
+        let (_, info) = runFFmpeg(["-i", path], timeout: 10)
+        if let r = info.range(of: #"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)"#, options: .regularExpression) {
+            let parts = info[r].dropFirst("Duration: ".count).split(separator: ":").compactMap { Double($0) }
+            if parts.count == 3 { out.duration = parts[0] * 3600 + parts[1] * 60 + parts[2] }
+        }
+        if let line = info.split(separator: "\n").first(where: { $0.contains("Video:") }),
+           let r = line.range(of: #" (\d{2,5})x(\d{2,5})"#, options: .regularExpression) {
+            out.dimensions = line[r].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "x", with: "×")
+        }
+        func frame(_ t: Double) -> CGImage? {
+            let (jpg, _) = runFFmpeg(["-v", "error", "-ss", String(format: "%.3f", t), "-i", path, "-frames:v", "1",
+                                      "-vf", "scale=480:-2", "-q:v", "3", "-f", "image2pipe", "-c:v", "mjpeg", "-"])
+            guard !jpg.isEmpty, let src = CGImageSourceCreateWithData(jpg as CFData, nil) else { return nil }
+            return CGImageSourceCreateImageAtIndex(src, 0, nil)
+        }
+        let d = out.duration ?? 1
+        if d > twoFrameLength {
+            out.image = frame(startOffset)
+            out.middle = frame(d / 2)
+            out.times = [startOffset, d / 2]
+        } else {
+            let t = min(10, d * 0.1)
+            out.image = frame(t)
+            out.times = [t]
+        }
         return out
     }
 
