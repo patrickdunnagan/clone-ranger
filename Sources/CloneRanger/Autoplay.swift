@@ -52,7 +52,11 @@ enum Autoplay {
                 try? await Task.sleep(for: .seconds(0.5))
             }
             snap(dir, "1 empty")
-            model.setSource(parts[0])
+            if let items = env["CR_AUTOPLAY_ITEMS"] {
+                model.setSources(items.split(separator: "|").map { parts[0].appendingPathComponent(String($0)) })
+            } else {
+                model.setSource(parts[0])
+            }
             for d in parts.dropFirst() { model.addDestination(d) }
             while model.draftScan == nil { try? await Task.sleep(for: .milliseconds(100)) }
             try? await Task.sleep(for: .seconds(0.5))

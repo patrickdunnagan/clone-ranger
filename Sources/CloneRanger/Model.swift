@@ -17,6 +17,7 @@ final class Transfer: ObservableObject, Identifiable {
     let source: URL
     let sourceName: String
     let parents: [URL]                       // the folders dropped as destinations
+    let items: [String]?                     // selected files/folders inside `source`; nil = the whole folder
     @Published var targets: [URL] = []       // the new "CLIP" / "CLIP 2" folders inside them (for showing)
     var targetPaths: [String] = []           // the same, byte-exact names (see FS)
     @Published var state: TState = .queued
@@ -40,9 +41,10 @@ final class Transfer: ObservableObject, Identifiable {
     var progress: TransferProgress?
     private var samples: [(Date, Int64)] = []
 
-    init(source: URL, parents: [URL], bytes: Int64, files: Int, id: UUID = UUID()) {
+    init(source: URL, parents: [URL], items: [String]? = nil, bytes: Int64, files: Int, id: UUID = UUID()) {
         self.id = id
         self.source = source
+        self.items = items
         self.sourceName = Plan.sourceName(source)
         self.parents = parents
         self.totalBytes = bytes
@@ -51,8 +53,9 @@ final class Transfer: ObservableObject, Identifiable {
 
     /// Rebuilt from a progress file left by a transfer that didn't finish (Clone Ranger quit or crashed).
     convenience init(unfinished st: JobState, id: UUID) {
-        let parents = st.targets.map { URL(fileURLWithPath: ($0 as NSString).deletingLastPathComponent) }
-        self.init(source: URL(fileURLWithPath: st.source), parents: parents, bytes: st.scan.bytes, files: st.scan.files, id: id)
+        let parents = st.targets.map { URL(fileURLWithPath: st.include != nil ? $0 : ($0 as NSString).deletingLastPathComponent) }
+        self.init(source: URL(fileURLWithPath: st.source), parents: parents, items: st.include, bytes: st.scan.bytes,
+                  files: st.scan.files, id: id)
         targetPaths = st.targets
         targets = st.targets.map { URL(fileURLWithPath: $0) }
         started = st.copyStarted
@@ -65,6 +68,8 @@ final class Transfer: ObservableObject, Identifiable {
     }
 
     var displayName: String { job?.sourceName ?? sourceName }
+    /// "7 items from 100MEDIA" for a selection, nil for a whole folder or card.
+    var selectionNote: String? { items.map { "\(Fmt.count($0.count, "item")) from \(displayName)" } }
     func volume(_ d: Int) -> String { job?.targetVolumes[d] ?? Fmt.volumeName(parents[d]) }
 
     /// What the colored pill and fill bar show.
@@ -179,6 +184,7 @@ final class AppModel: ObservableObject {
     @Published var selected: UUID?           // nil = the new-transfer area is showing
     @Published var draftSource: URL?
     @Published var draftDests: [URL] = []
+    @Published var draftItems: [String]?    // selected files/folders inside draftSource; nil = the whole folder
     @Published var draftScan: ScanResult?
     @Published var draftScanning = false
     @Published var notice: String?
@@ -235,26 +241,61 @@ final class AppModel: ObservableObject {
 
     // MARK: New transfer
 
-    func setSource(_ url: URL) {
+    /// One folder or card: recreated as a new folder in each destination. Anything else (some files, or
+    /// files and folders together): those items go straight into the destination folders.
+    func setSources(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        var isDir: ObjCBool = false
+        if urls.count == 1, FileManager.default.fileExists(atPath: urls[0].path, isDirectory: &isDir), isDir.boolValue {
+            setSource(urls[0], items: nil)
+            return
+        }
+        // Everything has to come from one folder on one card or drive.
+        let folders = Set(urls.map { $0.standardizedFileURL.deletingLastPathComponent().path })
+        guard folders.count == 1, let folder = folders.first else {
+            notice = "Pick files from one folder at a time (these come from \(folders.count) different folders)."
+            return
+        }
+        setSource(URL(fileURLWithPath: folder), items: urls.map { Plan.exactName($0) })
+    }
+
+    func setSource(_ url: URL, items: [String]? = nil) {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
-            notice = "Drop a folder or a card to copy from (\(url.lastPathComponent) isn't a folder)."
+            setSources([url])   // a single file: copy just that file
             return
         }
         notice = nil
         selected = nil
         draftSource = url
-        draftDests.removeAll { Plan.problem(source: url, destination: $0, others: []) != nil }
+        draftItems = items
+        draftDests.removeAll { destProblem($0, others: []) != nil }
         draftScan = nil
         draftScanning = true
         Task.detached(priority: .userInitiated) {
-            let scan = Scanner.scan(url)
+            let scan = Scanner.scan(path: url.path, only: items)
             await MainActor.run {
-                guard self.draftSource == url else { return }
+                guard self.draftSource == url, self.draftItems == items else { return }
                 self.draftScan = scan
                 self.draftScanning = false
             }
         }
+    }
+
+    /// A destination can't be the source, or inside what's being copied.
+    private func destProblem(_ url: URL, others: [URL]) -> String? {
+        guard let items = draftItems, let src = draftSource else { return Plan.problem(source: draftSource, destination: url, others: others) }
+        if let p = Plan.problem(source: nil, destination: url, others: others) { return p }
+        for item in items {
+            if let p = Plan.problem(source: src.appendingPathComponent(item), destination: url, others: []) { return p }
+        }
+        return nil
+    }
+
+    /// Selected items whose names are already in a destination folder (checked before Start).
+    func clashes(in dest: URL) -> [String] {
+        guard let items = draftItems else { return [] }
+        return items.filter { FS.exists(FS.join(dest.path, $0)) }
     }
 
     func addDestination(_ url: URL) {
@@ -263,7 +304,7 @@ final class AppModel: ObservableObject {
             notice = "Up to \(Self.maxDestinations) destinations per transfer."
             return
         }
-        if let p = Plan.problem(source: draftSource, destination: url, others: draftDests) {
+        if let p = destProblem(url, others: draftDests) {
             notice = "\(url.lastPathComponent): \(p)."
             return
         }
@@ -274,7 +315,7 @@ final class AppModel: ObservableObject {
     func removeDestination(_ url: URL) { draftDests.removeAll { $0 == url } }
 
     func clearDraft() {
-        draftSource = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil
+        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil
     }
 
     /// Bytes this draft would put on each destination's drive, counting other destinations on the same drive.
@@ -292,7 +333,20 @@ final class AppModel: ObservableObject {
 
     func commit() {
         guard draftReady, let src = draftSource, let scan = draftScan else { return }
-        let t = Transfer(source: src, parents: draftDests, bytes: scan.bytes, files: scan.files)
+        // Red flag: names already in a destination. Never overwritten; ask before going ahead.
+        let clashing = draftDests.map { (Fmt.volumeName($0) + " › " + $0.lastPathComponent, clashes(in: $0)) }.filter { !$0.1.isEmpty }
+        if !clashing.isEmpty && ProcessInfo.processInfo.environment["CR_AUTOPLAY"] == nil {
+            let a = NSAlert()
+            a.alertStyle = .warning
+            let total = clashing.reduce(0) { $0 + $1.1.count }
+            a.messageText = "\(Fmt.count(total, "name")) already in the destination"
+            a.informativeText = clashing.map { "\($0.0): \($0.1.prefix(5).joined(separator: ", "))\($0.1.count > 5 ? " and \($0.1.count - 5) more" : "")" }
+                .joined(separator: "\n") + "\n\nNothing there gets overwritten. A file that's identical is left as it is and counted as already backed up; anything different is copied with “ 2” added to its name. The report lists each one."
+            a.addButton(withTitle: "Continue")
+            a.addButton(withTitle: "Cancel")
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let t = Transfer(source: src, parents: draftDests, items: draftItems, bytes: scan.bytes, files: scan.files)
         watch(t)
         transfers.append(t)
         selected = t.id
@@ -318,10 +372,14 @@ final class AppModel: ObservableObject {
 
     private func start(_ t: Transfer) {
         // Pick "CLIP" / "CLIP 2"… now, not when queued, so earlier transfers' folders are seen.
-        t.targetPaths = t.parents.map { p in
-            let name = Plan.targetName(for: t.source, in: p, also: reserved[p.path] ?? [])
-            reserved[p.path, default: []].insert(name.lowercased())
-            return FS.join(p.path, name)
+        if t.items != nil {
+            t.targetPaths = t.parents.map(\.path)   // straight into the folders that were dropped
+        } else {
+            t.targetPaths = t.parents.map { p in
+                let name = Plan.targetName(for: t.source, in: p, also: reserved[p.path] ?? [])
+                reserved[p.path, default: []].insert(name.lowercased())
+                return FS.join(p.path, name)
+            }
         }
         t.targets = t.targetPaths.map { URL(fileURLWithPath: $0) }
         let progress = TransferProgress(destinations: t.parents.count)
@@ -329,7 +387,7 @@ final class AppModel: ObservableObject {
         t.started = Date()
         t.state = .scanning
         t.stageChanged()
-        let job = TransferJob(source: t.source.path, targets: t.targetPaths, control: t.control, progress: progress,
+        let job = TransferJob(source: t.source.path, targets: t.targetPaths, include: t.items, control: t.control, progress: progress,
                               stage: stageHandler(t))
         t.job = job
         Notify.askOnce()
@@ -394,7 +452,9 @@ final class AppModel: ObservableObject {
         t.reportProblem = problem
         t.finished = Date()
         t.state = outcome.canceled ? .canceled : outcome.failedCount > 0 || outcome.fatal != nil ? .failed : .verified
-        for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path]?.remove((target as NSString).lastPathComponent.lowercased()) }
+        if t.items == nil {
+            for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path]?.remove((target as NSString).lastPathComponent.lowercased()) }
+        }
         Journal.remove(t)
         pump()
         if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
@@ -486,17 +546,17 @@ final class AppModel: ObservableObject {
     // MARK: Choose with a panel (for people who'd rather click than drag)
 
     func chooseSource() {
-        if let u = pick(prompt: "Copy From", multiple: false).first { setSource(u) }
+        setSources(pick(prompt: "Copy From", multiple: true, files: true))
     }
 
     func chooseDestinations() {
         for u in pick(prompt: "Copy To", multiple: true) { addDestination(u) }
     }
 
-    private func pick(prompt: String, multiple: Bool) -> [URL] {
+    private func pick(prompt: String, multiple: Bool, files: Bool = false) -> [URL] {
         let p = NSOpenPanel()
         p.canChooseDirectories = true
-        p.canChooseFiles = false
+        p.canChooseFiles = files
         p.canCreateDirectories = true
         p.allowsMultipleSelection = multiple
         p.prompt = prompt

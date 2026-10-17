@@ -13,6 +13,25 @@ func dropped(_ providers: [NSItemProvider], _ handle: @escaping @MainActor (URL)
     return true
 }
 
+/// Reads every dropped Finder item, then hands them over together (several clips dropped at once).
+func droppedAll(_ providers: [NSItemProvider], _ handle: @escaping @MainActor ([URL]) -> Void) -> Bool {
+    let group = DispatchGroup()
+    let lock = NSLock()
+    var urls: [(Int, URL)] = []
+    for (i, p) in providers.enumerated() where p.canLoadObject(ofClass: URL.self) {
+        group.enter()
+        _ = p.loadObject(ofClass: URL.self) { url, _ in
+            if let url { lock.withLock { urls.append((i, url)) } }
+            group.leave()
+        }
+    }
+    group.notify(queue: .main) {
+        let ordered = urls.sorted { $0.0 < $1.0 }.map(\.1)
+        MainActor.assumeIsolated { handle(ordered) }
+    }
+    return true
+}
+
 struct CenterColumn: View {
     @EnvironmentObject var model: AppModel
 
@@ -75,7 +94,7 @@ struct CenterColumn: View {
     }
 
     private var hint: String {
-        if model.draftSource == nil { return "Drop a card or folder below to copy from" }
+        if model.draftSource == nil { return "Drop a card, a folder, or some clips below to copy from" }
         if model.draftDests.isEmpty { return "Now drop where it should go" }
         if model.draftScanning { return "Counting files…" }
         if !model.draftReady { return "Fix the destination marked in red" }
@@ -111,9 +130,16 @@ struct Composer: View {
                             .buttonStyle(.plain).foregroundStyle(T.label3).help("Clear")
                     }
                     HStack(spacing: 12) {
-                        Image(systemName: "sdcard").font(.system(size: 26)).foregroundStyle(T.amber)
+                        Image(systemName: model.draftItems == nil ? "sdcard" : "doc.on.doc").font(.system(size: 26)).foregroundStyle(T.amber)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(Plan.sourceName(src)).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                            if let items = model.draftItems {
+                                Text("\(Fmt.count(items.count, "item")) from \(Plan.sourceName(src))")
+                                    .font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                                Text(items.prefix(6).joined(separator: ", ") + (items.count > 6 ? " and \(items.count - 6) more" : ""))
+                                    .font(.system(size: 12)).foregroundStyle(T.label2).lineLimit(2)
+                            } else {
+                                Text(Plan.sourceName(src)).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                            }
                             Text(src.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
                                 .lineLimit(1).truncationMode(.middle)
                             if let s = model.draftScan {
@@ -124,17 +150,17 @@ struct Composer: View {
                             }
                         }
                     }
-                    Text("Drop another folder here to swap it.")
+                    Text(model.draftItems == nil ? "Drop something else here to swap it." : "These go straight into each destination folder. Drop something else here to swap.")
                         .font(.system(size: 11)).foregroundStyle(T.label3)
                 }
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(T.blue, lineWidth: sourceHover ? 2 : 0))
             } else {
-                Ghost(icon: "sdcard", title: "Drop the card or folder to copy from",
-                      detail: "Everything inside is recreated exactly, folders and all.",
+                Ghost(icon: "sdcard", title: "Drop the card, a folder, or some clips to copy from",
+                      detail: "A card or folder is recreated exactly, folders and all. Clips you pick go straight into the destination folder.",
                       hover: sourceHover, button: "Choose…") { model.chooseSource() }
             }
         }
-        .onDrop(of: [.fileURL], isTargeted: $sourceHover) { dropped(Array($0.prefix(1))) { model.setSource($0) } }
+        .onDrop(of: [.fileURL], isTargeted: $sourceHover) { droppedAll($0) { model.setSources($0) } }
     }
 
     @ViewBuilder private var destinations: some View {
@@ -173,7 +199,27 @@ struct DestDraftRow: View {
                 Text(Fmt.volumeName(url)).font(.system(size: 14, weight: .semibold)).foregroundStyle(T.label)
                 Text(Fmt.shortPath(url)).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
                     .lineLimit(1).truncationMode(.middle)
-                if let src = model.draftSource {
+                if let src = model.draftSource, let items = model.draftItems {
+                    // A selection lands straight in this folder, reports alongside.
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.down.doc").foregroundStyle(T.blue)
+                        Text("\(Fmt.count(items.count, "item")) straight into \(url.lastPathComponent)").foregroundStyle(T.label)
+                        Text("+").foregroundStyle(T.label3)
+                        Image(systemName: "doc.text").foregroundStyle(T.label2)
+                        Text(Plan.sourceName(src) + " Reports").foregroundStyle(T.label2)
+                    }
+                    .font(.system(size: 12))
+                    let clash = model.clashes(in: url)
+                    if !clash.isEmpty {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(T.red)
+                            Text("Already here: \(clash.prefix(4).joined(separator: ", "))\(clash.count > 4 ? " and \(clash.count - 4) more" : ""). Nothing is overwritten: identical files are left as they are, different ones get “ 2” added.")
+                                .foregroundStyle(T.red)
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.top, 2)
+                    }
+                } else if let src = model.draftSource {
                     let name = Plan.targetName(for: src, in: url)
                     HStack(spacing: 6) {
                         Image(systemName: "folder.badge.plus").foregroundStyle(T.blue)
@@ -240,7 +286,7 @@ struct TransferDetail: View {
                 batteryWarning
                 Card {
                     SectionLabel(text: "Transfer from")
-                    Text(t.displayName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                    Text(t.selectionNote ?? t.displayName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
                     Text(t.source.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Text("\(Fmt.count(t.totalFiles, "file")) · \(Fmt.bytes(t.totalBytes))")
@@ -503,7 +549,7 @@ extension TransferDetail {
     @ViewBuilder var unverifiedButtons: some View {
         HStack(spacing: 8) {
             ForEach(t.targetPaths.indices, id: \.self) { d in
-                let folder = Engine.unverifiedFolder(forTarget: t.targetPaths[d])
+                let folder = t.job?.unverifiedFolder(d) ?? Engine.unverifiedFolder(forTarget: t.targetPaths[d])
                 if FS.exists(folder) {
                     Button("Show \((folder as NSString).lastPathComponent) on \(t.volume(d))") {
                         NSWorkspace.shared.activateFileViewerSelecting([ReportWriter.exactURL(folder)])

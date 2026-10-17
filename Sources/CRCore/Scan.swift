@@ -139,6 +139,20 @@ public enum Plan {
         return "\(base) \(i)"
     }
 
+    /// A file or folder's name exactly as it's stored on disk (URL can hand it back in another Unicode form).
+    public static func exactName(_ url: URL) -> String {
+        let want = url.lastPathComponent
+        if let d = opendir(url.deletingLastPathComponent().path) {
+            defer { closedir(d) }
+            while let e = readdir(d) {
+                var ent = e.pointee
+                let name = withUnsafePointer(to: &ent.d_name) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
+                if name == want { return name }
+            }
+        }
+        return want
+    }
+
     /// The folder name the source is recreated under. A whole card uses its volume name.
     public static func sourceName(_ source: URL) -> String {
         if source.path == "/" { return "Macintosh HD" }

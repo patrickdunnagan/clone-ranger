@@ -6,9 +6,13 @@ import CRCore
 struct ReportData: @unchecked Sendable {
     var source: String
     var sourceName: String
-    var targets: [String]          // byte-exact paths of the new folders
+    var targets: [String]          // byte-exact paths of the copies (the new folders, or the folders dropped into)
     var outcome: TransferOutcome
     var started: Date
+    var selection: String?         // "7 items from 100MEDIA" when only some files were copied
+    var reportFolders: [String]    // where each destination's report goes
+    var reportBase: String         // start of the report's file name
+    var volumes: [String]          // drive names, remembered while plugged in
 
     @MainActor init(_ t: Transfer) {
         source = t.source.path
@@ -16,6 +20,10 @@ struct ReportData: @unchecked Sendable {
         targets = t.targetPaths
         outcome = t.outcome!
         started = t.started ?? Date()
+        selection = t.selectionNote
+        reportFolders = t.targetPaths.indices.map { t.job?.reportsFolder($0) ?? t.targetPaths[$0] + " Reports" }
+        reportBase = t.job?.reportBase ?? t.sourceName
+        volumes = t.targetPaths.indices.map { t.volume($0) }
     }
 }
 
@@ -24,13 +32,12 @@ enum ReportWriter {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
 
-    /// "<CLIP> Reports/<CLIP> 261010-2245.pdf" inside each folder that was dropped as a destination.
-    static func reportPath(target: String, date: Date, ext: String) -> String {
+    /// "CLIP Reports/CLIP 261010-2245.pdf" next to a copied folder; "100MEDIA Reports/100MEDIA 261010-2245.pdf"
+    /// inside the folder that selected files were copied into.
+    static func reportPath(folder: String, name: String, date: Date, ext: String) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyMMdd-HHmm"
-        let name = (target as NSString).lastPathComponent
-        let folder = FS.join((target as NSString).deletingLastPathComponent, name + " Reports")
         var path = FS.join(folder, "\(name) \(f.string(from: date)).\(ext)")
         var i = 2
         while FS.exists(path) {
@@ -61,8 +68,9 @@ enum ReportWriter {
         for batch in stride(from: 0, to: clips.count, by: 4).map({ Array(clips[$0..<min($0 + 4, clips.count)]) }) {
             await withTaskGroup(of: (String, FrameGrab.Still).self) { g in
                 for r in batch {
-                    let base = d.targets.indices.first { r.errors[$0] == nil }.map { d.targets[$0] } ?? d.source
-                    g.addTask { (r.item.path, await FrameGrab.still(for: exactURL(FS.join(base, r.item.path)))) }
+                    let path = d.targets.indices.first { r.errors[$0] == nil }.map { FS.join(d.targets[$0], r.rel($0)) }
+                        ?? FS.join(d.source, r.item.path)
+                    g.addTask { (r.item.path, await FrameGrab.still(for: exactURL(path))) }
                 }
                 for await (p, s) in g { stills[p] = s }
             }
@@ -72,7 +80,7 @@ enum ReportWriter {
         var urls: [URL?] = []
         var problem: String?
         for (i, target) in d.targets.enumerated() {
-            let path = reportPath(target: target, date: now, ext: "pdf")
+            let path = reportPath(folder: d.reportFolders[i], name: d.reportBase, date: now, ext: "pdf")
             do {
                 try FS.makeFolders((path as NSString).deletingLastPathComponent)
                 try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path), compactClips: compactClips,
@@ -92,7 +100,10 @@ enum ReportWriter {
         var lines = [(["Path", "Size (bytes)", "Modified", "xxHash64"] + d.targets.map { "Status · " + $0 }).map(q).joined(separator: ",")]
         let iso = ISO8601DateFormatter()
         for r in d.outcome.results where r.item.kind != .folder {
-            let status = r.errors.indices.map { i in r.errors[i] ?? (r.retried[i] ? "Verified on second copy" : "Verified") }
+            let status = r.errors.indices.map { i in
+                r.errors[i] ?? (r.isAlreadyThere(i) ? "Already there (identical)" : r.renamed(i) ? "Verified, saved as \(r.rel(i))"
+                               : r.retried[i] ? "Verified on second copy" : "Verified")
+            }
             lines.append(([r.item.path, "\(r.item.size)", r.item.modified.map(iso.string) ?? "", r.hash ?? ""] + status).map(q).joined(separator: ","))
         }
         try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
@@ -135,7 +146,7 @@ enum ReportWriter {
         let rows: [(String, String)] = [
             ("Report created", date.formatted(date: .long, time: .shortened)),
             ("Transfer started", d.started.formatted(date: .long, time: .shortened)),
-            ("Source", d.source),
+            ("Source", d.selection.map { "\($0): \(d.source)" } ?? d.source),
             ("Files", "\(Fmt.count(o.scan.files, "file")) · \(Fmt.bytes(o.scan.bytes))"
                 + (o.scan.skipped > 0 ? " · \(o.scan.skipped) Mac system files left out (.DS_Store and similar)" : "")),
             ("Copy", "\(Fmt.duration(copySecs)) · \(Fmt.rate(Double(o.scan.bytes) / max(copySecs, 0.001))) from the source"),
@@ -155,7 +166,7 @@ enum ReportWriter {
             let bad = o.results.filter { $0.errors[i] != nil }.count
             let (s, c) = p.map { ($0, red) } ?? (bad == 0 ? ("Verified", green) : (o.canceled ? "Canceled · \(bad) not done" : "\(bad) failed", bad > 0 && o.canceled ? tan : red))
             pdf.ensure(24)
-            pdf.text((i == thisDestination ? "▸ " : "") + volumeName(ofTarget: t), x: X, y: pdf.y, size: 9.5, weight: .semibold, color: ink, width: 150)
+            pdf.text((i == thisDestination ? "▸ " : "") + d.volumes[d.targets.firstIndex(of: t) ?? 0], x: X, y: pdf.y, size: 9.5, weight: .semibold, color: ink, width: 150)
             pdf.text(s, x: X + W - 150, y: pdf.y, size: 9.5, weight: .semibold, color: c, width: 150, alignRight: true)
             pdf.y += 12
             pdf.y += pdf.wrapped(t, x: X + 10, y: pdf.y, width: W - 10, size: 8, color: gray, mono: true) + 5
@@ -192,7 +203,7 @@ enum ReportWriter {
                 pdf.y += 11
                 for (i, e) in r.errors.enumerated() {
                     guard let e else { continue }
-                    pdf.y += pdf.wrapped("\(volumeName(ofTarget: d.targets[i])): \(e)", x: X + 10, y: pdf.y, width: W - 10, size: 8, color: o.canceled ? tan : red) + 2
+                    pdf.y += pdf.wrapped("\(d.volumes[i]): \(e)", x: X + 10, y: pdf.y, width: W - 10, size: 8, color: o.canceled ? tan : red) + 2
                 }
                 for m in r.unverified.joined() {
                     pdf.y += pdf.wrapped("Bad copy kept for checking: \(m)", x: X + 10, y: pdf.y, width: W - 10, size: 7.5, color: gray, mono: true) + 2
@@ -200,6 +211,28 @@ enum ReportWriter {
                 pdf.y += 2
             }
             if failed.count > 500 { pdf.text("…and \(failed.count - 500) more", x: X, y: pdf.y, size: 8.5, color: gray); pdf.y += 12 }
+        }
+
+        // Selected files whose names were already in a destination.
+        let clashRows: [(String, String)] = o.results.flatMap { r in
+            d.targets.indices.compactMap { k -> (String, String)? in
+                guard r.errors[k] == nil, r.item.kind == .file else { return nil }
+                if r.isAlreadyThere(k) { return (r.item.path, "\(d.volumes[k]): already there and identical, so it wasn't copied again (checked by checksum)") }
+                if r.renamed(k) { return (r.item.path, "\(d.volumes[k]): a different file with this name was already there, so this one was saved as “\((r.rel(k) as NSString).lastPathComponent)”") }
+                return nil
+            }
+        }
+        if !clashRows.isEmpty {
+            let amber = CGColor(srgbRed: 0.72, green: 0.50, blue: 0.0, alpha: 1)
+            pdf.y += 6
+            pdf.heading("Names already in the destination (\(clashRows.count))", color: amber)
+            pdf.y += pdf.wrapped("Nothing that was already in a destination folder was changed or overwritten.", x: X, y: pdf.y, width: W, size: 8, color: gray) + 4
+            for (path, what) in clashRows {
+                pdf.ensure(22)
+                pdf.text(path, x: X, y: pdf.y, size: 8.5, weight: .semibold, color: ink, width: W)
+                pdf.y += 11
+                pdf.y += pdf.wrapped(what, x: X + 10, y: pdf.y, width: W - 10, size: 8, color: amber) + 3
+            }
         }
 
         let recovered = o.results.filter { r in r.retried.contains(true) && !r.errors.contains { $0 != nil } }
@@ -215,7 +248,7 @@ enum ReportWriter {
                 pdf.y += 11
                 for (i, e) in r.firstError.enumerated() {
                     guard let e else { continue }
-                    pdf.y += pdf.wrapped("\(volumeName(ofTarget: d.targets[i])) first try: \(e)", x: X + 10, y: pdf.y, width: W - 10, size: 8, color: amber) + 2
+                    pdf.y += pdf.wrapped("\(d.volumes[i]) first try: \(e)", x: X + 10, y: pdf.y, width: W - 10, size: 8, color: amber) + 2
                 }
                 for (i, moved) in r.unverified.enumerated() {
                     for m in moved {
@@ -340,7 +373,8 @@ enum ReportWriter {
             }
             for (k, t) in d.targets.enumerated() {
                 // Drive name plus the folder the copy went into, so two copies on one drive are told apart.
-                let label = volumeName(ofTarget: t) + " › " + ((t as NSString).deletingLastPathComponent as NSString).lastPathComponent
+                let label = d.volumes[k] + " › " + (d.selection != nil ? (t as NSString).lastPathComponent
+                                                    : ((t as NSString).deletingLastPathComponent as NSString).lastPathComponent)
                 pdf.text(label, x: colX[3] + CGFloat(k) * destW + pad, y: pdf.y + 3, size: 6.8, weight: .semibold, color: white,
                          width: destW - pad * 2)
             }
@@ -368,7 +402,11 @@ enum ReportWriter {
                 let good = !unused && r.errors[k] == nil
                 pdf.text(unused ? "—" : good ? "✓" : "✗", x: x + pad, y: y + 1.8, size: 7, weight: .bold,
                          color: unused ? gray : good ? greenTick : red, width: 9)
-                let where_ = unused ? "drive not used" : good ? trimmed((FS.join(t, r.item.path) as NSString).deletingLastPathComponent)
+                let landed = FS.join(t, r.rel(k))
+                let where_ = unused ? "drive not used"
+                    : good && r.isAlreadyThere(k) ? "already there, identical: " + trimmed((landed as NSString).deletingLastPathComponent, keep: 2)
+                    : good && r.renamed(k) ? "as \((r.rel(k) as NSString).lastPathComponent) in " + trimmed((landed as NSString).deletingLastPathComponent, keep: 2)
+                    : good ? trimmed((landed as NSString).deletingLastPathComponent)
                     : "not copied (see Problems)"
                 pdf.text(where_, x: x + pad + 9, y: y + 2.2, size: font, color: good ? ink : unused ? gray : red,
                          width: destW - pad * 2 - 9, truncateStart: true)

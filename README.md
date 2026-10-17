@@ -3,6 +3,11 @@
 Verified offload for the Mac, in the spirit of ShotPut Pro. Reads the source once, writes it to up to four
 destinations at the same time, then reads every copy back off its drive and compares xxHash64 checksums.
 Anything that fails its verify is moved to "<folder> Unverified" (same subfolders), then just those files are copied again from the source (two more tries) and flagged.
+Drop a card or folder and it's recreated as a new folder in each destination. Drop some files (or files and
+folders together, all from one folder) and they go straight into the destination folders; names already there are
+never overwritten: identical files count as already there, different ones get " 2" added (flagged before Start and
+in the report).
+
 A PDF report (frame per video clip) lands in "<folder> Reports" next to each copy.
 
 Unplugged mid-transfer? The transfer stops (no automatic resume), notifies, and waits. When the card or drive is
