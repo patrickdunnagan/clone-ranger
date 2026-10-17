@@ -59,7 +59,7 @@ public enum Scanner {
     /// straight from the disk (readdir) so they're recreated byte for byte.
     public static func scan(_ root: URL) -> ScanResult { scan(path: root.path) }
 
-    public static func scan(path root: String) -> ScanResult {
+    public static func scan(path root: String, only: [String]? = nil) -> ScanResult {
         var items: [SourceItem] = []
         var problems: [ScanProblem] = []
         var skipped = 0
@@ -101,7 +101,24 @@ public enum Scanner {
                 }
             }
         }
-        walk("")
+        if let only {
+            // Just the selected files and folders inside `root`.
+            for name in only.sorted(by: { $0.utf8.lexicographicallyPrecedes($1.utf8) }) {
+                guard let st = FS.lstatInfo(FS.join(root, name)) else {
+                    problems.append(ScanProblem(path: name, reason: "Couldn't read: \(FS.errorText())"))
+                    continue
+                }
+                let mtime = Date(timeIntervalSince1970: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)
+                switch st.st_mode & S_IFMT {
+                case S_IFDIR: items.append(SourceItem(path: name, kind: .folder, size: 0, modified: mtime)); walk(name)
+                case S_IFLNK: items.append(SourceItem(path: name, kind: .link, size: 0, modified: mtime))
+                case S_IFREG: items.append(SourceItem(path: name, kind: .file, size: Int64(st.st_size), modified: mtime))
+                default: problems.append(ScanProblem(path: name, reason: "Not a regular file (device, socket or pipe); left out"))
+                }
+            }
+        } else {
+            walk("")
+        }
         return ScanResult(items: items, problems: problems, skipped: skipped)
     }
 }

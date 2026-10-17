@@ -55,7 +55,10 @@ let t0 = Date()
 var stageTimes: [String] = []
 if env["CR_TEST_CORRUPT"] != nil { Engine.corruptForTest = true }
 if env["CR_TEST_CORRUPT_ALWAYS"] != nil { Engine.corruptForTest = true; Engine.corruptAlwaysForTest = true }
-let job = TransferJob(source: args[0], targets: targets, control: JobControl(), progress: progress) { s in
+// CR_ITEMS="a|b|c": copy just these items from <source> straight into each destination folder.
+let items = env["CR_ITEMS"].map { $0.split(separator: "|").map(String.init) }
+let jobTargets = items == nil ? targets : Array(args.dropFirst())
+let job = TransferJob(source: args[0], targets: jobTargets, include: items, control: JobControl(), progress: progress) { s in
     stageTimes.append("\(s) at \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
 }
 var out = job.start()
@@ -87,7 +90,7 @@ let verify = out.verifyFinished.timeIntervalSince(out.copyFinished)
 print("files \(s.files)  bytes \(s.bytes)  skipped \(s.skipped)")
 print(stageTimes.joined(separator: "  |  "))
 print(String(format: "copy %.2fs (%.0f MB/s read)  verify %.2fs", copy, Double(s.bytes) / max(copy, 0.001) / 1e6, verify))
-for t in targets { print("→ \(t)") }
+for t in jobTargets { print("→ \(t)") }
 for (d, p) in out.destinationProblems.enumerated() where p != nil { print("DEST \(d) PROBLEM: \(p!)") }
 var bad = 0
 for r in out.results where r.errors.contains(where: { $0 != nil }) {
@@ -95,6 +98,12 @@ for r in out.results where r.errors.contains(where: { $0 != nil }) {
     if bad <= 20 { print("FAIL \(r.item.path): \(r.errors.compactMap { $0 }.joined(separator: " / "))") }
 }
 for r in out.results where !r.unverified.joined().isEmpty { print("UNVERIFIED COPY: \(r.unverified.joined().joined(separator: ", "))") }
+for r in out.results {
+    for d in jobTargets.indices {
+        if r.isAlreadyThere(d) { print("ALREADY THERE (identical) on dest \(d): \(r.item.path)") }
+        else if r.renamed(d) { print("RENAMED on dest \(d): \(r.item.path) → \(r.rel(d))") }
+    }
+}
 for r in out.results where r.retried.contains(true) { print("RE-COPIED: \(r.item.path) first: \(r.firstError.compactMap { $0 }.joined()) now: \(r.errors.map { $0 ?? "OK" }.joined(separator: ", "))") }
 print(bad == 0 && s.problems.isEmpty ? "ALL VERIFIED" : "\(bad) failed")
 exit(bad == 0 ? 0 : 1)

@@ -38,6 +38,19 @@ public struct ItemResult: Sendable, Codable {
     public var retried: [Bool]          // per destination: failed the first time, copied again
     public var firstError: [String?]    // per destination: what went wrong the first time
     public var unverified: [[String]]   // per destination: where copies that failed their verify were moved
+    /// Selected files only: per destination, the path inside it when the name had to change ("DJI_0001 2.MP4"),
+    /// nil when it kept its own name.
+    public var destRel: [String?]?
+    /// Selected files only: per destination, a file of that name was already there and was identical, so it
+    /// counts as copied and verified without a second copy.
+    public var alreadyThere: [Bool]?
+    /// Selected files only: per destination, the name was taken when the transfer started and the file there
+    /// was the same size, so it's checked for being identical once this copy is verified.
+    public var maybeSame: [Bool]?
+
+    public func rel(_ d: Int) -> String { (destRel?[d]).flatMap { $0 } ?? item.path }
+    public func isAlreadyThere(_ d: Int) -> Bool { alreadyThere?[d] ?? false }
+    public func renamed(_ d: Int) -> Bool { (destRel?[d]).flatMap { $0 } != nil && !isAlreadyThere(d) }
 }
 
 public enum ResumeMode: String, Sendable, Codable {
@@ -93,6 +106,7 @@ public struct JobState: Codable, Sendable {
     public var sourceLost: Bool          // the source went away at some point, so it must be re-checked
     public var sourceName: String?
     public var targetVolumes: [String]?  // drive names, remembered while they were plugged in
+    public var include: [String]?        // selected items inside `source`; nil = the whole folder
 }
 
 public enum Engine {
@@ -107,6 +121,18 @@ public enum Engine {
     /// same folders, so the real copy only ever holds verified files.
     public static func unverifiedFolder(forTarget t: String) -> String {
         FS.join((t as NSString).deletingLastPathComponent, (t as NSString).lastPathComponent + " Unverified")
+    }
+
+    /// "DJI_0001.MP4" → "DJI_0001 2.MP4", "DJI_0001 3.MP4"… the first that's free in `folder`.
+    public static func freeName(_ name: String, in folder: String, taken: Set<String> = []) -> String {
+        let ext = (name as NSString).pathExtension
+        let stem = ext.isEmpty ? name : (name as NSString).deletingPathExtension
+        var i = 2
+        while true {
+            let candidate = "\(stem) \(i)" + (ext.isEmpty ? "" : "." + ext)
+            if !FS.exists(FS.join(folder, candidate)) && !taken.contains(candidate.lowercased()) { return candidate }
+            i += 1
+        }
     }
 
     public static func volumeUUID(_ path: String) -> String? {
@@ -126,6 +152,10 @@ public enum Engine {
 public final class TransferJob: @unchecked Sendable {
     public let source: String
     public let targets: [String]
+    /// Selected items inside `source` (files and/or folders), copied straight into each target folder,
+    /// which already exists. nil = the whole source folder is recreated as a new folder (`targets`).
+    public let include: [String]?
+    public var selection: Bool { include != nil }
     public var control: JobControl
     public var progress: TransferProgress
     public var stage: @Sendable (Stage) -> Void
@@ -150,24 +180,27 @@ public final class TransferJob: @unchecked Sendable {
     private var n: Int { targets.count }
     private var files: [Int] = []
 
-    public init(source: String, targets: [String], control: JobControl, progress: TransferProgress,
+    public init(source: String, targets: [String], include: [String]? = nil, control: JobControl, progress: TransferProgress,
                 stage: @escaping @Sendable (Stage) -> Void) {
         self.source = source
         self.targets = targets
+        self.include = include
         self.control = control
         self.progress = progress
         self.stage = stage
         destProblems = Array(repeating: nil, count: targets.count)
         destGone = Array(repeating: false, count: targets.count)
-        local = targets.map { Plan.isLocal(URL(fileURLWithPath: ($0 as NSString).deletingLastPathComponent)) }
+        // The folder that already exists: the target itself for a selection, else its parent.
+        let homes = targets.map { include != nil ? $0 : ($0 as NSString).deletingLastPathComponent }
+        local = homes.map { Plan.isLocal(URL(fileURLWithPath: $0)) }
         sourceName = Plan.sourceName(URL(fileURLWithPath: source))
-        targetVolumes = targets.map { Plan.volumeName(URL(fileURLWithPath: ($0 as NSString).deletingLastPathComponent)) }
+        targetVolumes = homes.map { Plan.volumeName(URL(fileURLWithPath: $0)) }
     }
 
     /// Rebuilds a job from its saved state, to resume it.
     public convenience init(state: JobState, control: JobControl, progress: TransferProgress,
                             stage: @escaping @Sendable (Stage) -> Void) {
-        self.init(source: state.source, targets: state.targets, control: control, progress: progress, stage: stage)
+        self.init(source: state.source, targets: state.targets, include: state.include, control: control, progress: progress, stage: stage)
         scan = state.scan
         results = state.results
         destProblems = state.destinationProblems
@@ -188,7 +221,8 @@ public final class TransferJob: @unchecked Sendable {
         lock.withLock {
             JobState(source: source, sourceVolumeUUID: sourceUUID, targets: targets, scan: scan, results: results,
                      destinationProblems: destProblems, copyOrder: copyOrder, events: events, copyStarted: copyStarted,
-                     sourceLost: sourceLost || sourceGone, sourceName: sourceName, targetVolumes: targetVolumes)
+                     sourceLost: sourceLost || sourceGone, sourceName: sourceName, targetVolumes: targetVolumes,
+                     include: include)
         }
     }
 
@@ -217,6 +251,17 @@ public final class TransferJob: @unchecked Sendable {
         return false
     }
     private func destAlive(_ d: Int) -> Bool { FS.exists(targets[d]) }
+    /// Where item k goes on destination d.
+    private func dpath(_ k: Int, _ d: Int) -> String { FS.join(targets[d], results[k].rel(d)) }
+    /// "Day 2/CLIP Reports" for a whole folder; "Day 2/100MEDIA Reports" inside the folder for a selection.
+    public func reportsFolder(_ d: Int) -> String {
+        selection ? FS.join(targets[d], sourceName + " Reports") : targets[d] + " Reports"
+    }
+    public func unverifiedFolder(_ d: Int) -> String {
+        selection ? FS.join(targets[d], sourceName + " Unverified") : Engine.unverifiedFolder(forTarget: targets[d])
+    }
+    /// Base of the report's file name: "CLIP 261012-0931.pdf" / "100MEDIA 261012-0931.pdf".
+    public var reportBase: String { selection ? sourceName : (targets.first.map { ($0 as NSString).lastPathComponent } ?? sourceName) }
     private var live: [Int] { (0..<n).filter { destProblems[$0] == nil && !destGone[$0] } }
     private var stopped: Bool { control.cancelled || lock.withLock { sourceGone || fatal != nil } }
     private func name(_ d: Int) -> String { targetVolumes[d] }
@@ -242,8 +287,8 @@ public final class TransferJob: @unchecked Sendable {
     public func start() -> TransferOutcome {
         stage(.scanning)
         sourceUUID = Engine.volumeUUID(source)
-        scan = Scanner.scan(path: source)
-        let parents = targets.map { URL(fileURLWithPath: ($0 as NSString).deletingLastPathComponent) }
+        scan = Scanner.scan(path: source, only: include)
+        let parents = targets.map { URL(fileURLWithPath: selection ? $0 : ($0 as NSString).deletingLastPathComponent) }
 
         // Room on each drive (destinations on the same drive share it).
         var need: [String: Int64] = [:]
@@ -259,13 +304,19 @@ public final class TransferJob: @unchecked Sendable {
             }
         }
         for d in 0..<n where destProblems[d] == nil {
-            do { try FS.makeNewFolder(targets[d]) } catch { destProblems[d] = error.localizedDescription }
+            if selection {
+                if !FS.exists(targets[d]) { destProblems[d] = "The destination folder is missing" }
+                else if access(targets[d], W_OK) != 0 { destProblems[d] = "Can't write to the destination folder" }
+            } else {
+                do { try FS.makeNewFolder(targets[d]) } catch { destProblems[d] = error.localizedDescription }
+            }
         }
         results = scan.items.map {
             ItemResult(item: $0, hash: nil, errors: destProblems, copied: Array(repeating: false, count: n),
                        verified: Array(repeating: false, count: n), retried: Array(repeating: false, count: n),
                        firstError: Array(repeating: nil, count: n), unverified: Array(repeating: [], count: n))
         }
+        if selection { settleNames() }
         files = results.indices.filter { results[$0].item.kind != .folder }
         copyStarted = Date()
         stage(.copying)
@@ -278,10 +329,41 @@ public final class TransferJob: @unchecked Sendable {
         return finish()
     }
 
+    /// Selected items whose names are already in a destination: decided once, up front, and never by
+    /// overwriting. A folder becomes "Name 2"; a file becomes "Name 2.ext", and if the file already there is the
+    /// same size it's checked after this copy is verified: identical means the extra copy is dropped and the
+    /// file counts as already there. Nothing that was in the destination before is ever changed.
+    private func settleNames() {
+        for d in 0..<n where destProblems[d] == nil {
+            var taken = Set<String>()
+            var clashes = 0
+            for top in include ?? [] where FS.exists(FS.join(targets[d], top)) {
+                let newTop = Engine.freeName(top, in: targets[d], taken: taken)
+                taken.insert(newTop.lowercased())
+                clashes += 1
+                let existing = FS.lstatInfo(FS.join(targets[d], top))
+                for k in results.indices {
+                    let path = results[k].item.path
+                    guard path == top || path.hasPrefix(top + "/") else { continue }
+                    if results[k].destRel == nil { results[k].destRel = Array(repeating: nil, count: n) }
+                    results[k].destRel![d] = newTop + path.dropFirst(top.count)
+                    if path == top, results[k].item.kind == .file, let e = existing, (e.st_mode & S_IFMT) == S_IFREG,
+                       Int64(e.st_size) == results[k].item.size {
+                        if results[k].maybeSame == nil { results[k].maybeSame = Array(repeating: false, count: n) }
+                        results[k].maybeSame![d] = true
+                    }
+                }
+            }
+            if clashes > 0 {
+                event("\(Fmt0.count(clashes, "name")) already in the destination on \(name(d)): copied with \" 2\" added, unless the file there turns out to be identical")
+            }
+        }
+    }
+
     private func makeFolders() {
         for (i, r) in results.enumerated() where r.item.kind == .folder {
             for d in live where results[i].errors[d] == nil {
-                do { try FS.makeFolders(FS.join(targets[d], r.item.path)) } catch {
+                do { try FS.makeFolders(dpath(i, d)) } catch {
                     results[i].errors[d] = error.localizedDescription
                 }
             }
@@ -316,7 +398,7 @@ public final class TransferJob: @unchecked Sendable {
                 let big = item.size >= Engine.bigFile
                 if big { bigGate.wait() }
                 progress.update { $0.current = item.path }
-                let out = MultiCopy.copy(src, to: dests.map { FS.join(targets[$0], item.path) },
+                let out = MultiCopy.copy(src, to: dests.map { dpath(k, $0) },
                                          local: dests.map { local[$0] }, control: control,
                                          read: { b in self.progress.update { $0.read += b } },
                                          wrote: { i, b in self.progress.update { $0.written[dests[i]] += b } })
@@ -331,7 +413,7 @@ public final class TransferJob: @unchecked Sendable {
         var buf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
         let len = readlink(src, &buf, Int(PATH_MAX))
         for d in dests {
-            let dst = FS.join(targets[d], results[k].item.path)
+            let dst = dpath(k, d)
             unlink(dst)
             if len >= 0, symlink(String(cString: buf), dst) == 0 {
                 lock.withLock { results[k].copied[d] = true; results[k].verified[d] = true }
@@ -358,7 +440,7 @@ public final class TransferJob: @unchecked Sendable {
                if corruptK == nil && firstTry { corruptK = k }
                return corruptK == k && (firstTry || Engine.corruptAlwaysForTest)
            }) {
-            let fd = open(FS.join(targets[0], item.path), O_WRONLY)
+            let fd = open(dpath(k, 0), O_WRONLY)
             var b: UInt8 = 0x5A
             _ = pwrite(fd, &b, 1, 1000)
             close(fd)
@@ -387,9 +469,25 @@ public final class TransferJob: @unchecked Sendable {
 
     // MARK: Verify
 
+    /// A name clash where the file already there was the same size: if it's identical to the source (read off
+    /// the drive and checksummed), our extra copy is removed and the file counts as already there, verified.
+    private func settleSame(_ k: Int, _ d: Int) {
+        let original = FS.join(targets[d], results[k].item.path)
+        let cached = MultiCopy.residentFraction(original) == 0
+        guard let h = try? MultiCopy.hashFile(original, control: control, depth: cached ? 1 : 4, cached: cached),
+              XXHash64.hex(h) == lock.withLock({ results[k].hash }) else { return }
+        let ours = dpath(k, d)
+        lock.withLock {
+            if results[k].alreadyThere == nil { results[k].alreadyThere = Array(repeating: false, count: n) }
+            results[k].alreadyThere![d] = true
+            results[k].destRel![d] = nil
+        }
+        unlink(ours)   // our own extra copy, made moments ago
+    }
+
     /// Reads one copy back off its drive and compares it with the source checksum.
     private func verifyOne(_ k: Int, _ d: Int, counting: Bool) {
-        let url = FS.join(targets[d], results[k].item.path)
+        let url = dpath(k, d)
         let expected = lock.withLock { results[k].hash }
         var err: String?
         do {
@@ -414,6 +512,7 @@ public final class TransferJob: @unchecked Sendable {
             results[k].errors[d] = err
             results[k].verified[d] = err == nil
         }
+        if err == nil, results[k].maybeSame?[d] == true, !results[k].isAlreadyThere(d) { settleSame(k, d) }
         if counting { progress.update { $0.filesVerified[d] += 1 } }
     }
 
@@ -450,9 +549,9 @@ public final class TransferJob: @unchecked Sendable {
     /// Moves a copy that failed its verify out of the real copy into "<name> Unverified", same folders.
     private func moveToUnverified(_ k: Int, _ d: Int) {
         let path = results[k].item.path
-        let from = FS.join(targets[d], path)
+        let from = dpath(k, d)
         guard FS.exists(from) else { return }
-        var to = FS.join(Engine.unverifiedFolder(forTarget: targets[d]), path)
+        var to = FS.join(unverifiedFolder(d), results[k].rel(d))
         let ext = (path as NSString).pathExtension
         let stem = ((to as NSString).lastPathComponent as NSString).deletingPathExtension
         var i = 2
@@ -489,14 +588,14 @@ public final class TransferJob: @unchecked Sendable {
                 for d in dests {
                     if results[k].firstError[d] == nil { results[k].firstError[d] = results[k].errors[d] }
                     // A copy that was written but failed its verify is kept for checking; anything else was ours to redo.
-                    if results[k].copied[d] { moveToUnverified(k, d) } else { unlink(FS.join(targets[d], item.path)) }
+                    if results[k].copied[d] { moveToUnverified(k, d) } else { unlink(dpath(k, d)) }
                     results[k].errors[d] = nil
                     results[k].copied[d] = false
                     results[k].retried[d] = true
                 }
                 progress.update { $0.current = item.path }
                 let before = results[k].hash
-                let out = MultiCopy.copy(FS.join(source, item.path), to: dests.map { FS.join(targets[$0], item.path) },
+                let out = MultiCopy.copy(FS.join(source, item.path), to: dests.map { dpath(k, $0) },
                                          local: dests.map { local[$0] }, control: control, read: { _ in }, wrote: { _, _ in })
                 if let h = out.hash.map(XXHash64.hex), let before, h != before, out.sourceError == nil {
                     // The source gave different data this time: the card or reader can't be trusted.
@@ -531,7 +630,7 @@ public final class TransferJob: @unchecked Sendable {
             for r in results.reversed() where r.item.kind == .folder {
                 guard let st = FS.lstatInfo(FS.join(source, r.item.path)) else { continue }
                 for d in live where r.errors[d] == nil {
-                    FS.setDates(FS.join(targets[d], r.item.path), modified: st.st_mtimespec, created: st.st_birthtimespec)
+                    FS.setDates(FS.join(targets[d], r.rel(d)), modified: st.st_mtimespec, created: st.st_birthtimespec)
                 }
             }
             // Nothing counts as done unless it was read back and matched.
@@ -556,7 +655,7 @@ public final class TransferJob: @unchecked Sendable {
     public func waitingFor() -> String? {
         var missing: [String] = []
         if !sourceAlive() { missing.append(sourceName) }
-        for d in 0..<n where destProblems[d] == nil && !FS.exists((targets[d] as NSString).deletingLastPathComponent) {
+        for d in 0..<n where destProblems[d] == nil && !FS.exists(selection ? targets[d] : (targets[d] as NSString).deletingLastPathComponent) {
             missing.append(name(d))
         }
         return missing.isEmpty ? nil : missing.joined(separator: " and ")
@@ -670,7 +769,8 @@ public final class TransferJob: @unchecked Sendable {
     private func tidyPartials() {
         for k in files where results[k].item.kind == .file {
             for d in live where !results[k].copied[d] {
-                let p = FS.join(targets[d], results[k].item.path)
+                guard !results[k].isAlreadyThere(d) else { continue }   // that file was there before: never touch it
+                let p = dpath(k, d)
                 unlink(FS.join((p as NSString).deletingLastPathComponent, "." + (p as NSString).lastPathComponent + MultiCopy.partialSuffix))
                 if FS.exists(p) {
                     if results[k].hash != nil { results[k].copied[d] = true } else { unlink(p) }
@@ -702,7 +802,7 @@ public final class TransferJob: @unchecked Sendable {
                 }
             } else {
                 guard let d = (0..<n).first(where: { results[k].copied[$0] && destProblems[$0] == nil }) else { continue }
-                let a = MultiCopy.sample(src), b = MultiCopy.sample(FS.join(targets[d], item.path))
+                let a = MultiCopy.sample(src), b = MultiCopy.sample(dpath(k, d))
                 progress.update { $0.recheckSourceDone += min(item.size, 2 * MultiCopy.sampleBytes) }
                 if a == nil || a != b {
                     return "\(item.path): the start or end of the file on the source no longer matches the copy. Don't trust this card or reader. Copies made before the unplug are kept."
