@@ -314,6 +314,43 @@ final class AppModel: ObservableObject {
 
     func removeDestination(_ url: URL) { draftDests.removeAll { $0 == url } }
 
+    // MARK: Eject
+
+    /// The first transfer that still needs this drive: running, queued, paused, or stopped waiting to resume.
+    /// Only canceled or finished transfers let it go.
+    func transferUsing(volume: URL) -> Transfer? {
+        let vol = volume.standardizedFileURL.path
+        func on(_ u: URL) -> Bool {
+            let p = u.standardizedFileURL.path
+            return vol == "/" ? false : (p == vol || p.hasPrefix(vol + "/"))
+        }
+        return transfers.first { t in !t.state.finished && (on(t.source) || t.parents.contains(where: on)) }
+    }
+
+    /// Unmounts and ejects a drive or card (off the main thread: it can take a few seconds).
+    func eject(_ volume: URL, name: String) {
+        if let t = transferUsing(volume: volume) {
+            notice = "\(name) can't be ejected: \(t.displayName) still needs it."
+            return
+        }
+        // Forget a not-yet-started transfer that points at it.
+        func on(_ u: URL) -> Bool { u.standardizedFileURL.path.hasPrefix(volume.standardizedFileURL.path + "/") || u.standardizedFileURL == volume.standardizedFileURL }
+        if let src = draftSource, on(src) { draftSource = nil; draftItems = nil; draftScan = nil; draftScanning = false }
+        draftDests.removeAll(where: on)
+        Task.detached(priority: .userInitiated) {
+            do {
+                try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
+            } catch {
+                await MainActor.run {
+                    let a = NSAlert()
+                    a.messageText = "\(name) couldn't be ejected"
+                    a.informativeText = "Another app may be using it (a Finder window, Premiere, Resolve…). Close it and try again.\n\n\(error.localizedDescription)"
+                    a.runModal()
+                }
+            }
+        }
+    }
+
     func clearDraft() {
         draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil
     }

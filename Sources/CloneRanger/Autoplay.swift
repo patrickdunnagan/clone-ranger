@@ -76,6 +76,9 @@ enum Autoplay {
             var sawVerify = false
             let resumeMode = env["CR_AUTOPLAY_RESUME"].map { $0 == "quick" ? ResumeMode.quick : .full }
             var sawStop = false, sawBack = false, sawRecheck = false
+            // Test: CR_TEST_EJECT=<volume>: Eject must be refused while a transfer uses it, and work once it's done.
+            let ejectVol = env["CR_TEST_EJECT"].map { URL(fileURLWithPath: $0) }
+            var ejectLog = "", triedEarly = false
             while model.busy || !model.queued.isEmpty || (resumeMode != nil && !model.interrupted.isEmpty) {
                 if let mode = resumeMode, let s = model.interrupted.first {
                     if s.waitingFor != nil && !sawStop { sawStop = true; snap(dir, "6 unplugged") }
@@ -100,12 +103,26 @@ enum Autoplay {
                 if env["CR_TEST_CANCEL"] != nil, let t, t.state == .verifying, (t.fraction) > 0.2, !t.control.cancelled {
                     t.control.cancelled = true   // the button asks first; the test skips the question
                 }
+                if let v = ejectVol, !triedEarly, let t {
+                    triedEarly = true
+                    ejectLog += "during \(t.state): using=\(model.transferUsing(volume: v)?.displayName ?? "nil")\n"
+                    model.eject(v, name: v.lastPathComponent)
+                    try? await Task.sleep(for: .seconds(2))
+                    ejectLog += "after refused eject: mounted=\(FileManager.default.fileExists(atPath: v.path)) notice=\(model.notice ?? "nil")\n"
+                }
                 if t?.state == .verifying, !sawVerify, (t?.fraction ?? 0) > 0.3 { sawVerify = true; snap(dir, "4 verifying") }
             }
             try? await Task.sleep(for: .seconds(1))
             model.selected = model.history.first?.id
             try? await Task.sleep(for: .seconds(0.5))
             snap(dir, "5 done")
+            if let v = ejectVol {
+                ejectLog += "after done: using=\(model.transferUsing(volume: v)?.displayName ?? "nil")\n"
+                model.eject(v, name: v.lastPathComponent)
+                try? await Task.sleep(for: .seconds(4))
+                ejectLog += "after eject: mounted=\(FileManager.default.fileExists(atPath: v.path))\n"
+                try? ejectLog.write(to: dir.appendingPathComponent("eject.txt"), atomically: true, encoding: .utf8)
+            }
             if env["CR_STAY"] == nil { NSApp.terminate(nil) }
         }
     }

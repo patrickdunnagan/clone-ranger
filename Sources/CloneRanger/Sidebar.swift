@@ -9,6 +9,7 @@ struct Place: Identifiable, Hashable {
     var kind: Kind
     var free: Int64?
     var total: Int64?
+    var ejectable = false
     var id: String { url.path }
 
     var icon: String {
@@ -62,7 +63,8 @@ final class Places: ObservableObject {
                           free: free, total: v.volumeTotalCapacity.map(Int64.init))
             if u.path == "/" { p.kind = .system; p.name = v.volumeLocalizedName ?? "Macintosh HD"; d.insert(p, at: 0); continue }
             if v.volumeIsLocal == false { p.kind = .network; n.append(p); continue }
-            if v.volumeIsInternal == true && v.volumeIsEjectable != true { p.kind = .system }
+            p.ejectable = v.volumeIsEjectable == true || v.volumeIsRemovable == true || v.volumeIsInternal != true
+            if v.volumeIsInternal == true && v.volumeIsEjectable != true { p.kind = .system; p.ejectable = false }
             else if v.volumeIsRemovable == true || looksLikeCard(u) { p.kind = .card }
             d.append(p)
         }
@@ -88,7 +90,7 @@ struct Sidebar: View {
                 group("This Mac", places.home)
                 group("Drives and cards", places.drives)
                 if !places.network.isEmpty { group("Network", places.network) }
-                Text("Drag a drive or folder into the middle, or right-click it.")
+                Text("Drag a drive, folder or file into the middle, or right-click it.")
                     .font(.system(size: 11))
                     .foregroundStyle(T.label3)
                     .padding(.horizontal, 14)
@@ -110,7 +112,80 @@ struct Sidebar: View {
     }
 }
 
-/// A folder in the left column that opens to show the folders inside it.
+/// What's inside a folder in the left column: folders first, then files.
+struct FolderContents {
+    struct File: Hashable { var url: URL; var size: Int64 }
+    var folders: [URL] = []
+    var files: [File] = []
+    var fileBytes: Int64 { files.reduce(0) { $0 + $1.size } }
+    static let shownFiles = 300
+
+    static func read(_ u: URL) -> FolderContents {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey]
+        var c = FolderContents()
+        for k in (try? FileManager.default.contentsOfDirectory(at: u, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? [] {
+            let v = try? k.resourceValues(forKeys: Set(keys))
+            if v?.isDirectory == true { c.folders.append(k) } else { c.files.append(File(url: k, size: Int64(v?.fileSize ?? 0))) }
+        }
+        let byName: (URL, URL) -> Bool = { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        c.folders.sort(by: byName)
+        c.files.sort { byName($0.url, $1.url) }
+        return c
+    }
+}
+
+/// A file in the left column (to check what's on a card). Drag it to copy just that file.
+struct FileRow: View {
+    @EnvironmentObject var model: AppModel
+    let file: FolderContents.File
+    let depth: Int
+    @State private var hover = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Spacer().frame(width: 12)
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundStyle(T.label3)
+                .frame(width: 18)
+            Text(file.url.lastPathComponent)
+                .font(.system(size: 12))
+                .foregroundStyle(T.label2)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
+            Spacer(minLength: 4)
+            Text(Fmt.bytes(file.size))
+                .font(.system(size: 10.5))
+                .foregroundStyle(T.label3)
+                .lineLimit(1)
+        }
+        .padding(.leading, 10 + CGFloat(depth) * 14)
+        .padding(.trailing, 12)
+        .padding(.vertical, 2.5)
+        .background(RoundedRectangle(cornerRadius: 5).fill(hover ? T.fill2 : .clear).padding(.horizontal, 6))
+        .contentShape(Rectangle())
+        .onHover { hover = $0 }
+        .onDrag { NSItemProvider(object: file.url as NSURL) }
+        .contextMenu {
+            Button("Copy Just This File") { model.setSources([file.url]) }
+            Divider()
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }
+        }
+        .help(file.url.path)
+    }
+
+    private var icon: String {
+        switch file.url.pathExtension.lowercased() {
+        case "mp4", "mov", "mxf", "braw", "r3d", "nev", "crm", "mts", "m2ts", "avi", "lrf", "insv": "film"
+        case "jpg", "jpeg", "heic", "png", "tif", "tiff", "dng", "arw", "cr2", "cr3", "nef", "raf", "orf", "rw2": "photo"
+        case "wav", "mp3", "aif", "aiff", "m4a", "bwf": "waveform"
+        default: "doc"
+        }
+    }
+}
+
+/// A folder in the left column that opens to show the folders and files inside it.
 struct FolderRow: View {
     @EnvironmentObject var model: AppModel
     let url: URL
@@ -119,7 +194,7 @@ struct FolderRow: View {
     let depth: Int
     var place: Place?
     @State private var open = false
-    @State private var children: [URL]?
+    @State private var children: FolderContents?
     @State private var hover = false
 
     var body: some View {
@@ -163,8 +238,21 @@ struct FolderRow: View {
                 Button("Add as Destination") { model.addDestination(url) }
                 Divider()
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                if let place, place.ejectable {
+                    Divider()
+                    if let t = model.transferUsing(volume: place.url) {
+                        Button("Can't Eject: \(t.displayName) needs it") {}.disabled(true)
+                    } else {
+                        Button("Eject \(place.name)") { model.eject(place.url, name: place.name) }
+                    }
+                }
             }
             .help(url.path)
+            .onAppear {
+                // Test: CR_SIDEBAR_OPEN="<path>|<path>…" opens those folders in the left column.
+                if let open = ProcessInfo.processInfo.environment["CR_SIDEBAR_OPEN"], !self.open,
+                   open.split(separator: "|").contains(where: { String($0) == url.path }) { toggle() }
+            }
 
             if let place, let free = place.free, let total = place.total, total > 0, place.kind != .home {
                 Bar(fraction: 1 - Double(free) / Double(total), color: T.label3, height: 3)
@@ -172,19 +260,33 @@ struct FolderRow: View {
             }
 
             if open {
-                if let children, !children.isEmpty {
-                    ForEach(children, id: \.self) { c in
+                if let children {
+                    ForEach(children.folders, id: \.self) { c in
                         FolderRow(url: c, name: c.lastPathComponent, icon: "folder", depth: depth + 1)
                     }
-                } else if children != nil {
-                    Text("No folders inside")
-                        .font(.system(size: 11))
-                        .foregroundStyle(T.label3)
-                        .padding(.leading, 46 + CGFloat(depth) * 14)
-                        .padding(.vertical, 2)
+                    if !children.files.isEmpty {
+                        note("\(Fmt.count(children.files.count, "file")) · \(Fmt.bytes(children.fileBytes))")
+                    }
+                    ForEach(children.files.prefix(FolderContents.shownFiles), id: \.self) { f in
+                        FileRow(file: f, depth: depth + 1)
+                    }
+                    if children.files.count > FolderContents.shownFiles {
+                        note("and \(children.files.count - FolderContents.shownFiles) more (Show in Finder to see them all)")
+                    }
+                    if children.folders.isEmpty && children.files.isEmpty { note("Empty") }
                 }
             }
         }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(T.label3)
+            .lineLimit(1)
+            .padding(.leading, 46 + CGFloat(depth) * 14)
+            .padding(.trailing, 12)
+            .padding(.vertical, 2)
     }
 
     private func toggle() {
@@ -192,10 +294,7 @@ struct FolderRow: View {
         if open {
             let u = url
             Task.detached {
-                let kids = ((try? FileManager.default.contentsOfDirectory(at: u, includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
-                                                                         options: [.skipsHiddenFiles])) ?? [])
-                    .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
-                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                let kids = FolderContents.read(u)
                 await MainActor.run { children = kids }
             }
         }
