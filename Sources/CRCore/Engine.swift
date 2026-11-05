@@ -14,6 +14,8 @@ public final class TransferProgress: @unchecked Sendable {
         public var recheckDestDone: Int64 = 0      // …and read back from the destinations
         public var recheckDestTotal: Int64 = 0
         public var current = ""
+        /// What it's doing when there's no byte count to show ("Listing files… 52,310 found"), else empty.
+        public var note = ""
         public init() {}
     }
     private var s = Snapshot()
@@ -159,6 +161,8 @@ public final class TransferJob: @unchecked Sendable {
     public var control: JobControl
     public var progress: TransferProgress
     public var stage: @Sendable (Stage) -> Void
+    /// Every step, problem and file error as a line of plain text, for the transfer's log file.
+    public var log: (@Sendable (String) -> Void)?
 
     private let lock = NSLock()
     private var scan = ScanResult(items: [], problems: [], skipped: 0)
@@ -228,6 +232,39 @@ public final class TransferJob: @unchecked Sendable {
 
     private func event(_ text: String, bad: Bool = false) {
         lock.withLock { events.append(TransferEvent(date: Date(), text: text, bad: bad)) }
+        log?((bad ? "PROBLEM: " : "") + text)
+    }
+
+    private func note(_ text: String) { progress.update { $0.note = text } }
+
+    /// Moves to the next stage: tells the app and notes it in the log.
+    private func enter(_ s: Stage) {
+        switch s {
+        case .scanning: log?("Starting")
+        case .copying: log?("Copying")
+        case .verifying: log?("Verifying: reading every copy back off its drive")
+        case .retrying(let n): log?("Copying \(n) file\(n == 1 ? "" : "s") again that failed the first time")
+        case .rechecking: log?("Re-checking what was already copied")
+        case .writingReport, .done: break
+        }
+        stage(s)
+    }
+    private static let number: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f
+    }()
+    static func num(_ n: Int) -> String { number.string(from: NSNumber(value: n)) ?? "\(n)" }
+
+    /// True when the source or any destination is a network share. Each file then costs several network
+    /// round trips whatever its size. Copying more files at once doesn't help: measured on the Synology
+    /// (Nov 2026), 4 or 16 at a time both ran about 65-80 small files a second, because the server makes
+    /// and renames files one after another.
+    private var networked: Bool { local.contains(false) || !Plan.isLocal(URL(fileURLWithPath: source)) }
+    /// Small files copied at the same time.
+    private var smallFileWorkers: Int {
+        if let n = ProcessInfo.processInfo.environment["CR_SMALL_WORKERS"].flatMap(Int.init), n > 0 { return n }   // test only
+        return 4
     }
 
     private func sourceAlive() -> Bool { FS.exists(source) }
@@ -285,9 +322,15 @@ public final class TransferJob: @unchecked Sendable {
     // MARK: First run
 
     public func start() -> TransferOutcome {
-        stage(.scanning)
+        enter(.scanning)
         sourceUUID = Engine.volumeUUID(source)
-        scan = Scanner.scan(path: source, only: include)
+        log?("Listing everything in \(source)")
+        note("Listing files…")
+        scan = Scanner.scan(path: source, only: include) { n in self.note("Listing files… \(TransferJob.num(n)) found") }
+        log?("Found \(TransferJob.num(scan.files)) files and \(TransferJob.num(scan.items.count - scan.files)) folders, \(ByteCountFormatter.string(fromByteCount: scan.bytes, countStyle: .file))"
+             + (scan.problems.isEmpty ? "" : "; \(scan.problems.count) couldn't be read"))
+        for p in scan.problems { log?("PROBLEM: \(p.path): \(p.reason)") }
+        if networked { log?("A network share is involved: small files cost a network round trip each, whatever their size") }
         let parents = targets.map { URL(fileURLWithPath: selection ? $0 : ($0 as NSString).deletingLastPathComponent) }
 
         // Room on each drive (destinations on the same drive share it).
@@ -300,6 +343,7 @@ public final class TransferJob: @unchecked Sendable {
         }
         for d in 0..<n {
             if let free = Plan.freeSpace(parents[d]), free < need[vol[d]]! {
+                log?("PROBLEM: \(targets[d]): not enough room")
                 destProblems[d] = "Not enough room: needs \(ByteCountFormatter.string(fromByteCount: need[vol[d]]!, countStyle: .file)), \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free"
             }
         }
@@ -319,7 +363,7 @@ public final class TransferJob: @unchecked Sendable {
         if selection { settleNames() }
         files = results.indices.filter { results[$0].item.kind != .folder }
         copyStarted = Date()
-        stage(.copying)
+        enter(.copying)
         makeFolders()
 
         copy(files.map { k in (k, live) })
@@ -361,13 +405,21 @@ public final class TransferJob: @unchecked Sendable {
     }
 
     private func makeFolders() {
-        for (i, r) in results.enumerated() where r.item.kind == .folder {
+        let folders = results.indices.filter { results[$0].item.kind == .folder }
+        guard !folders.isEmpty else { return }
+        let total = TransferJob.num(folders.count)
+        log?("Making \(total) folders")
+        for (j, i) in folders.enumerated() {
+            if j % 50 == 0 { note("Making folders… \(TransferJob.num(j)) of \(total)") }
+            if control.cancelled { break }
             for d in live where results[i].errors[d] == nil {
                 do { try FS.makeFolders(dpath(i, d)) } catch {
                     results[i].errors[d] = error.localizedDescription
+                    log?("PROBLEM: couldn't make folder \(dpath(i, d)): \(error.localizedDescription)")
                 }
             }
         }
+        note("")
     }
 
     // MARK: Copy
@@ -379,7 +431,7 @@ public final class TransferJob: @unchecked Sendable {
         var next = 0
         let bigGate = DispatchSemaphore(value: 0)
         bigGate.signal()   // one big file at a time: cards and drives read best in one long run
-        DispatchQueue.concurrentPerform(iterations: max(1, min(4, work.count))) { _ in
+        DispatchQueue.concurrentPerform(iterations: max(1, min(smallFileWorkers, work.count))) { _ in
             while true {
                 let job: (Int, [Int])? = lock.withLock {
                     guard next < work.count, !control.cancelled, !sourceGone, fatal == nil else { return nil }
@@ -457,6 +509,7 @@ public final class TransferJob: @unchecked Sendable {
                         destGone[d] = true
                     } else {
                         results[k].errors[d] = e
+                        log?("PROBLEM copying \(item.path) to \(name(d)): \(e)")
                     }
                 } else {
                     results[k].copied[d] = true
@@ -497,7 +550,10 @@ public final class TransferJob: @unchecked Sendable {
             let h = XXHash64.hex(try MultiCopy.hashFile(url, control: control, depth: cached ? 1 : 4, cached: cached) { b in
                 if counting { self.progress.update { $0.verified[d] += b } }
             })
-            if h != expected { err = "Checksum didn't match: source \(expected ?? "?"), destination \(h)" }
+            if h != expected {
+                err = "Checksum didn't match: source \(expected ?? "?"), destination \(h)"
+                log?("PROBLEM verifying \(results[k].item.path) on \(name(d)): \(err!)")
+            }
         } catch CopyError.cancelled {
             return
         } catch {
@@ -518,7 +574,7 @@ public final class TransferJob: @unchecked Sendable {
 
     /// Reads back every copied-but-unchecked file on every reachable destination (destinations at once).
     private func verify() {
-        stage(.verifying)
+        enter(.verifying)
         DispatchQueue.concurrentPerform(iterations: n) { d in
             guard lock.withLock({ destProblems[d] == nil && !destGone[d] }) else { return }
             let mine = files.filter { k in
@@ -576,7 +632,7 @@ public final class TransferJob: @unchecked Sendable {
                 results[k].item.kind == .file && live.contains { d in results[k].errors[d] != nil && !results[k].verified[d] }
             }
             if failed.isEmpty { break }
-            stage(.retrying(failed.count))
+            enter(.retrying(failed.count))
             Thread.sleep(forTimeInterval: 2)
             for k in failed where !stopped {
                 guard sourceAlive() else {
@@ -627,7 +683,11 @@ public final class TransferJob: @unchecked Sendable {
                 for d in 0..<n where results[k].copied[d] && results[k].errors[d] != nil { moveToUnverified(k, d) }
             }
             // Folder dates last (writing into a folder changes its date), deepest first.
+            let folderCount = results.filter { $0.item.kind == .folder }.count
+            var dated = 0
             for r in results.reversed() where r.item.kind == .folder {
+                if dated % 50 == 0 { note("Setting folder dates… \(TransferJob.num(dated)) of \(TransferJob.num(folderCount))") }
+                dated += 1
                 guard let st = FS.lstatInfo(FS.join(source, r.item.path)) else { continue }
                 for d in live where r.errors[d] == nil {
                     FS.setDates(FS.join(targets[d], r.rel(d)), modified: st.st_mtimespec, created: st.st_birthtimespec)
@@ -642,6 +702,7 @@ public final class TransferJob: @unchecked Sendable {
                 }
             }
         }
+        note("")
         return lock.withLock {
             TransferOutcome(scan: scan, results: results, destinationProblems: destProblems, canceled: control.cancelled,
                             sourceGone: sourceGone, destGone: destGone, fatal: fatal, events: events,
@@ -694,7 +755,7 @@ public final class TransferJob: @unchecked Sendable {
             event("Tried to resume, but \(w) isn't connected", bad: true)
             return finish()
         }
-        stage(.rechecking)
+        enter(.rechecking)
         let label = sourceName
         let checkSource = sourceLost || sourceGone
 
@@ -739,7 +800,7 @@ public final class TransferJob: @unchecked Sendable {
         _ = rechecked
 
         // 3. Copy what's left, verify it, retry anything that failed.
-        stage(.copying)
+        enter(.copying)
         makeFolders()
         let work = files.compactMap { k -> (Int, [Int])? in
             let ds = live.filter { !results[k].copied[$0] && results[k].errors[$0] == nil }

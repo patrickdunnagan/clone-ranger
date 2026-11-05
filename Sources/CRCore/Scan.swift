@@ -39,6 +39,11 @@ public struct ScanResult: Sendable, Codable {
     public var items: [SourceItem]
     public var problems: [ScanProblem]        // folders or files that couldn't be read
     public var skipped: Int                   // system files left out (.DS_Store, Spotlight, Trash…)
+    public init(items: [SourceItem], problems: [ScanProblem], skipped: Int) {
+        self.items = items
+        self.problems = problems
+        self.skipped = skipped
+    }
     public var files: Int { items.filter { $0.kind != .folder }.count }
     public var bytes: Int64 { items.reduce(0) { $0 + ($1.kind == .file ? $1.size : 0) } }
 }
@@ -59,7 +64,8 @@ public enum Scanner {
     /// straight from the disk (readdir) so they're recreated byte for byte.
     public static func scan(_ root: URL) -> ScanResult { scan(path: root.path) }
 
-    public static func scan(path root: String, only: [String]? = nil) -> ScanResult {
+    /// `found` is told how many things have been listed so far, every few hundred (for a live count).
+    public static func scan(path root: String, only: [String]? = nil, found: ((Int) -> Void)? = nil) -> ScanResult {
         var items: [SourceItem] = []
         var problems: [ScanProblem] = []
         var skipped = 0
@@ -88,6 +94,7 @@ public enum Scanner {
                     continue
                 }
                 let mtime = Date(timeIntervalSince1970: Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)
+                if items.count % 250 == 0 { found?(items.count) }
                 switch st.st_mode & S_IFMT {
                 case S_IFDIR:
                     items.append(SourceItem(path: r, kind: .folder, size: 0, modified: mtime))
@@ -119,6 +126,7 @@ public enum Scanner {
         } else {
             walk("")
         }
+        found?(items.count)
         return ScanResult(items: items, problems: problems, skipped: skipped)
     }
 }

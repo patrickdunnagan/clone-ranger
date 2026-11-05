@@ -14,7 +14,19 @@ enum Autoplay {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(1))
                 model.setSource(parts[0])
+                // Test: CR_PREFILL_ADD="<path>|<path>…" drops more onto "copy from", one drop at a time.
+                for extra in (env["CR_PREFILL_ADD"] ?? "").split(separator: "|") {
+                    while model.draftScanning { try? await Task.sleep(for: .milliseconds(100)) }
+                    model.addSources([URL(fileURLWithPath: String(extra))])
+                }
                 for d in parts.dropFirst() { model.addDestination(d) }
+                if let dir = env["CR_SNAP_DIR"].map({ URL(fileURLWithPath: $0) }) {
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    while model.draftScanning || model.draftScan == nil { try? await Task.sleep(for: .milliseconds(100)) }
+                    try? await Task.sleep(for: .seconds(1))
+                    snap(dir, "prefill")
+                    if env["CR_STAY"] == nil { NSApp.terminate(nil) }
+                }
             }
             return
         }
@@ -89,6 +101,11 @@ enum Autoplay {
                 }
                 if model.active.first?.state == .rechecking, !sawRecheck { sawRecheck = true; try? await Task.sleep(for: .seconds(0.4)); snap(dir, "8 rechecking") }
                 try? await Task.sleep(for: .seconds(1))
+                // Test: CR_SNAP_EVERY=<seconds> also saves a picture that often ("t 012").
+                if let every = env["CR_SNAP_EVERY"].flatMap(Double.init), let start = model.active.first?.started {
+                    let n = Int(Date().timeIntervalSince(start))
+                    if n % max(1, Int(every)) == 0 { snap(dir, String(format: "t %03d", n)) }
+                }
                 let t = model.active.first
                 if t?.state == .copying, shots < 1, (t?.fraction ?? 0) > 0.3 {
                     shots += 1
@@ -113,14 +130,18 @@ enum Autoplay {
                 if t?.state == .verifying, !sawVerify, (t?.fraction ?? 0) > 0.3 { sawVerify = true; snap(dir, "4 verifying") }
             }
             try? await Task.sleep(for: .seconds(1))
+            snap(dir, "4b ready for the next one")
             model.selected = model.history.first?.id
             try? await Task.sleep(for: .seconds(0.5))
             snap(dir, "5 done")
             if let v = ejectVol {
                 ejectLog += "after done: using=\(model.transferUsing(volume: v)?.displayName ?? "nil")\n"
                 model.eject(v, name: v.lastPathComponent)
-                try? await Task.sleep(for: .seconds(4))
-                ejectLog += "after eject: mounted=\(FileManager.default.fileExists(atPath: v.path))\n"
+                var waited = 0.0
+                while FileManager.default.fileExists(atPath: v.path) && waited < 20 {
+                    try? await Task.sleep(for: .seconds(0.5)); waited += 0.5
+                }
+                ejectLog += "after eject: mounted=\(FileManager.default.fileExists(atPath: v.path)) (\(waited) s)\n"
                 try? ejectLog.write(to: dir.appendingPathComponent("eject.txt"), atomically: true, encoding: .utf8)
             }
             if env["CR_STAY"] == nil { NSApp.terminate(nil) }

@@ -22,7 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.addButton(withTitle: "Keep Running")
             alert.addButton(withTitle: "Quit")
             guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
-            for t in m.active where t.state != .report { Journal.saveNow(t) }
+            for t in m.active where t.state != .report {
+                t.log?.line("Clone Ranger was quit while this was running. It can be picked back up next time it opens.")
+                t.log?.flush()
+                Journal.saveNow(t)
+            }
             return .terminateNow
         }
     }
@@ -54,6 +58,9 @@ struct CloneRangerApp: App {
                 Button("Choose Source…") { model.chooseSource() }.keyboardShortcut("o")
                 Button("Add Destination…") { model.chooseDestinations() }.keyboardShortcut("d")
             }
+            CommandGroup(after: .help) {
+                Button("Show Logs") { NSWorkspace.shared.open(TransferLog.folder) }
+            }
         }
 
         Settings {
@@ -75,9 +82,9 @@ struct RootView: View {
                 let right = min(370, max(290, g.size.width * 0.27))
                 HStack(spacing: 0) {
                     Sidebar().frame(width: left)
-                    Divider().overlay(T.sep)
+                    Groove()
                     CenterColumn().frame(maxWidth: .infinity)
-                    Divider().overlay(T.sep)
+                    Groove()
                     RightColumn().frame(width: right)
                 }
                 .frame(width: g.size.width, height: g.size.height)
@@ -106,10 +113,43 @@ struct TopBar: View {
                 .help("Settings")
                 .padding(.trailing, 16)
         }
-        .frame(height: 46)
+        .frame(height: 50)
         .frame(maxWidth: .infinity)
-        .background(T.bar)
-        .overlay(alignment: .bottom) { Rectangle().fill(T.sepStrong).frame(height: 1) }
+        // Bevelled: a light top lip, a shaded face, a dark bottom edge and a soft shadow onto the columns.
+        .background(LinearGradient(colors: [Color(hex: 0x3C3C3C), Color(hex: 0x2F2F2F)], startPoint: .top, endPoint: .bottom))
+        .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1) }
+        .overlay(alignment: .bottom) {
+            VStack(spacing: 0) {
+                Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1)
+                Rectangle().fill(Color(hex: 0x141414)).frame(height: 1)
+            }
+        }
+        .shadow(color: .black.opacity(0.45), radius: 4, y: 2)
+        .zIndex(1)
+    }
+}
+
+/// The heavier line between columns: a dark groove with a light lip.
+struct Groove: View {
+    var body: some View {
+        HStack(spacing: 0) {
+            Rectangle().fill(Color(hex: 0x111111)).frame(width: 1)
+            Rectangle().fill(Color(hex: 0x1A1A1A)).frame(width: 3)
+            Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
+        }
+        .frame(width: 5)
+    }
+}
+
+/// The same groove, lying flat (between sections in a column).
+struct FlatGroove: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(Color(hex: 0x111111)).frame(height: 1)
+            Rectangle().fill(Color(hex: 0x1A1A1A)).frame(height: 2)
+            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
+        }
+        .frame(height: 4)
     }
 }
 

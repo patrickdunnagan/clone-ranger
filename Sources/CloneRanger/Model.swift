@@ -39,7 +39,14 @@ final class Transfer: ObservableObject, Identifiable {
     var finished: Date?
     let control = JobControl()
     var progress: TransferProgress?
+    var log: TransferLog?
+    private var lastLogged = Date()
     private var samples: [(Date, Int64)] = []
+    /// For the time estimate: (time, files done, bytes done) every 2 s this stage, and what each costs.
+    private var marks: [(Date, Double, Double)] = []
+    private var secPerByte: Double?
+    private var secPerFile: Double = 0
+    @Published var filesPerSecond: Double = 0
 
     init(source: URL, parents: [URL], items: [String]? = nil, bytes: Int64, files: Int, id: UUID = UUID()) {
         self.id = id
@@ -139,11 +146,47 @@ final class Transfer: ObservableObject, Identifiable {
         }
     }
 
-    var secondsLeft: Double? {
-        guard speed > 1, state == .copying || state == .verifying else { return nil }
-        let total = Double(totalBytes) * (state == .verifying ? Double(liveCount) : 1)
-        return max(0, total * (1 - fraction) / speed)
+    /// Time left in this stage. Each file costs a fixed amount (opening, flushing, dates, renaming: a lot
+    /// on a network share) plus time for its bytes, learned separately, so a folder of thousands of tiny
+    /// files doesn't make the rest of a big transfer look like it'll take days.
+    @Published private(set) var secondsLeft: Double?
+
+    /// Files and bytes done in this stage (verify: the average across drives), and the totals.
+    private var stageCounts: (files: Double, bytes: Double)? {
+        switch state {
+        case .copying: return (Double(snap.filesCopied), Double(snap.read))
+        case .verifying:
+            let n = Double(max(1, liveCount))
+            return (Double(snap.filesVerified.reduce(0, +)) / n, Double(snap.verified.reduce(0, +)) / n)
+        default: return nil
+        }
     }
+
+    private func updateEstimate(_ now: Date) {
+        guard !paused, let (files, bytes) = stageCounts else { secondsLeft = nil; filesPerSecond = 0; return }
+        if let last = marks.last, now.timeIntervalSince(last.0) < 2 { return }
+        if let last = marks.last {
+            // Learn from each 2-second stretch: mostly small files teach the cost of a file, mostly big
+            // files (or a stretch spent inside one) the cost of a byte. Small and big files copy side by
+            // side, so a stretch that's neither teaches nothing.
+            let dt = now.timeIntervalSince(last.0), df = files - last.1, db = bytes - last.2
+            func blend(_ old: Double?, _ new: Double) -> Double { old.map { $0 * 0.7 + new * 0.3 } ?? new }
+            if df > 0, db / df < 1_000_000 { secPerFile = blend(secPerFile > 0 ? secPerFile : nil, dt / df) }
+            else if db > 0, df == 0 || db / df >= 16_000_000 { secPerByte = blend(secPerByte, dt / db) }
+        }
+        marks.append((now, files, bytes))
+        if marks.count > 61 { marks.removeFirst() }
+        guard marks.count >= 3, let first = marks.first else { secondsLeft = nil; return }
+        let dt = now.timeIntervalSince(first.0)
+        filesPerSecond = dt > 0 ? (files - first.1) / dt : 0
+        // What's left is known exactly from the listing: so many files, so many bytes.
+        let perByte = secPerByte ?? 1 / (onNetwork ? 100_000_000.0 : 400_000_000.0)
+        let perFile = secPerFile > 0 ? secPerFile : (onNetwork ? 0.012 : 0.002)
+        secondsLeft = max(0, (Double(totalFiles) - files) * perFile + (Double(totalBytes) - bytes) * perByte)
+    }
+
+    /// The source or a destination is a network share.
+    var onNetwork: Bool { !Plan.isLocal(source) || parents.contains { !Plan.isLocal($0) } }
 
     var elapsed: Double {
         guard let started else { return 0 }
@@ -163,9 +206,21 @@ final class Transfer: ObservableObject, Identifiable {
         if let first = samples.first, now.timeIntervalSince(first.0) > 0.4 {
             speed = Double(bytes - first.1) / now.timeIntervalSince(first.0)
         }
+        updateEstimate(now)
+        // A progress line in the log every minute.
+        if now.timeIntervalSince(lastLogged) >= 60 {
+            lastLogged = now
+            let files = state == .verifying ? (snap.filesVerified.max() ?? 0) : snap.filesCopied
+            log?.line("\(label): \(files.formatted()) of \(totalFiles.formatted()) files, \(Fmt.bytes(bytes)) of \(Fmt.bytes(totalBytes))"
+                      + " · \(Fmt.rate(speed)) · \(Int(filesPerSecond)) files/s" + (secondsLeft.map { " · about \(Fmt.duration($0)) left" } ?? "")
+                      + (snap.note.isEmpty ? "" : " · \(snap.note)"))
+        }
     }
 
-    func stageChanged() { samples.removeAll(); speed = 0; stageStarted = Date() }
+    func stageChanged() {
+        samples.removeAll(); speed = 0; stageStarted = Date()
+        marks.removeAll(); secPerFile = 0; secondsLeft = nil; filesPerSecond = 0
+    }
 
     /// Per-destination status after the transfer.
     func destinationSummary(_ d: Int) -> (ok: Bool, text: String) {
@@ -188,6 +243,11 @@ final class AppModel: ObservableObject {
     @Published var draftScan: ScanResult?
     @Published var draftScanning = false
     @Published var notice: String?
+    /// The transfer that just finished, shown as a banner over a fresh "ready for the next one" area.
+    @Published var justFinished: UUID?
+    /// Files and bytes in each thing listed under "copy from" (a whole folder or card: one entry, "").
+    @Published var draftStats: [String: ItemStat] = [:]
+    struct ItemStat { var files = 0; var bytes: Int64 = 0; var folder = false }
     @AppStorage("transfersAtOnce") var transfersAtOnce = 1
     @AppStorage("saveCSV") var saveCSV = false
     @AppStorage("largeReportFrames") var largeReportFrames = false
@@ -259,6 +319,81 @@ final class AppModel: ObservableObject {
         setSource(URL(fileURLWithPath: folder), items: urls.map { Plan.exactName($0) })
     }
 
+    /// A drop onto "copy from" when something's already there: adds to it. Everything has to come from one
+    /// place (one folder on one card, drive or server); a whole card can't be mixed with folders from it.
+    func addSources(_ urls: [URL]) {
+        guard let current = draftSource, !urls.isEmpty else { setSources(urls); return }
+        var folder = current, items = draftItems ?? []
+        if draftItems == nil {
+            let isVolume = (try? current.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true
+            if isVolume || current.path == "/" {
+                notice = "\(Plan.sourceName(current)) is a whole card or drive, so nothing can be added to it. Clear it first to pick folders from inside it."
+                return
+            }
+            folder = current.deletingLastPathComponent()
+            items = [Plan.exactName(current)]
+        }
+        let home = folder.standardizedFileURL.path
+        if let stranger = urls.first(where: { $0.standardizedFileURL.deletingLastPathComponent().path != home }) {
+            notice = "\(stranger.lastPathComponent) is from a different place (\(Fmt.place(stranger.deletingLastPathComponent()))). One place per transfer: start this one, then set that one up next."
+            return
+        }
+        let new = urls.map { Plan.exactName($0) }.filter { n in !items.contains(n) }
+        guard !new.isEmpty else { return }
+        if draftItems != nil, let old = draftScan, !draftScanning {
+            // Only the new ones need counting.
+            let all = items + new
+            draftItems = all
+            draftScanning = true
+            notice = nil
+            Task.detached(priority: .userInitiated) {
+                let add = Scanner.scan(path: folder.path, only: new)
+                await MainActor.run {
+                    guard self.draftSource == folder, self.draftItems == all else { return }
+                    self.draftScan = ScanResult(items: old.items + add.items, problems: old.problems + add.problems,
+                                                skipped: old.skipped + add.skipped)
+                    self.countDraft()
+                    self.draftScanning = false
+                }
+            }
+        } else {
+            setSource(folder, items: items + new)
+        }
+    }
+
+    /// Takes one thing off the "copy from" list.
+    func removeSourceItem(_ name: String) {
+        guard let src = draftSource, var items = draftItems else { clearDraft(); return }
+        items.removeAll { $0 == name }
+        if items.isEmpty { clearDraft(); return }
+        draftItems = items
+        if let s = draftScan {
+            draftScan = ScanResult(items: s.items.filter { $0.path != name && !$0.path.hasPrefix(name + "/") },
+                                   problems: s.problems.filter { $0.path != name && !$0.path.hasPrefix(name + "/") }, skipped: s.skipped)
+            countDraft()
+        } else {
+            setSource(src, items: items)
+        }
+    }
+
+    /// Per-entry file counts and sizes for the "copy from" list.
+    private func countDraft() {
+        guard let scan = draftScan else { draftStats = [:]; return }
+        var stats: [String: ItemStat] = [:]
+        if let items = draftItems {
+            for item in scan.items {
+                let top = item.path.split(separator: "/", maxSplits: 1).first.map(String.init) ?? item.path
+                if item.path == top { stats[top, default: ItemStat()].folder = item.kind == .folder }
+                if item.kind != .folder { stats[top, default: ItemStat()].files += 1 }
+                if item.kind == .file { stats[top, default: ItemStat()].bytes += item.size }
+            }
+            for i in items where stats[i] == nil { stats[i] = ItemStat() }
+        } else {
+            stats[""] = ItemStat(files: scan.files, bytes: scan.bytes, folder: true)
+        }
+        draftStats = stats
+    }
+
     func setSource(_ url: URL, items: [String]? = nil) {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
@@ -277,6 +412,7 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 guard self.draftSource == url, self.draftItems == items else { return }
                 self.draftScan = scan
+                self.countDraft()
                 self.draftScanning = false
             }
         }
@@ -352,7 +488,7 @@ final class AppModel: ObservableObject {
     }
 
     func clearDraft() {
-        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil
+        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil; draftStats = [:]
     }
 
     /// Bytes this draft would put on each destination's drive, counting other destinations on the same drive.
@@ -387,6 +523,7 @@ final class AppModel: ObservableObject {
         watch(t)
         transfers.append(t)
         selected = t.id
+        justFinished = nil
         clearDraft()
         pump()
     }
@@ -427,8 +564,18 @@ final class AppModel: ObservableObject {
         let job = TransferJob(source: t.source.path, targets: t.targetPaths, include: t.items, control: t.control, progress: progress,
                               stage: stageHandler(t))
         t.job = job
+        startLog(t, "Started")
         Notify.askOnce()
         run(t) { $0.start() }
+    }
+
+    /// Opens a log for the transfer (or carries on the one it has) and connects the copy engine to it.
+    private func startLog(_ t: Transfer, _ what: String) {
+        let log = t.log ?? TransferLog(name: t.displayName)
+        t.log = log
+        t.job?.log = { log.line($0) }
+        log.line("\(what): \(t.selectionNote ?? t.displayName) from \(t.source.path)")
+        for (d, p) in t.parents.enumerated() { log.line("  to \(d < t.targetPaths.count ? t.targetPaths[d] : p.path)") }
     }
 
     private func stageHandler(_ t: Transfer) -> @Sendable (Stage) -> Void {
@@ -472,6 +619,8 @@ final class AppModel: ObservableObject {
             t.state = .interrupted
             t.waitingFor = t.job?.waitingFor()
             t.interruptedBy = outcome.events.last(where: \.bad)?.text ?? "Something was unplugged"
+            t.log?.line("STOPPED: \(t.interruptedBy). Waiting to be resumed.")
+            t.log?.flush()
             Journal.save(t)
             Notify.post("\(t.displayName) stopped", "\(t.interruptedBy). Plug it back in, then choose how to resume. Nothing copied so far is lost.")
             NSSound(named: "Basso")?.play()
@@ -489,6 +638,18 @@ final class AppModel: ObservableObject {
         t.reportProblem = problem
         t.finished = Date()
         t.state = outcome.canceled ? .canceled : outcome.failedCount > 0 || outcome.fatal != nil ? .failed : .verified
+        if let log = t.log {
+            if let f = outcome.fatal { log.line("PROBLEM: \(f)") }
+            if let problem { log.line("PROBLEM: \(problem)") }
+            log.line("Finished: \(t.label) · \(outcome.scan.files.formatted()) files · \(Fmt.bytes(outcome.scan.bytes)) · took \(Fmt.duration(t.elapsed))"
+                     + (outcome.failedCount > 0 ? " · \(outcome.failedCount) failed" : "") + (outcome.recoveredCount > 0 ? " · \(outcome.recoveredCount) needed a second copy" : ""))
+            for r in reports.compactMap({ $0 }) { log.line("Report: \(r.path)") }
+            log.copy(nextTo: reports)
+        }
+        // Back to a fresh "ready for the next one" area, with a banner saying how it went. Anything
+        // already being set up there is left as it is.
+        if selected == t.id { selected = nil }
+        justFinished = t.id
         if t.items == nil {
             for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path]?.remove((target as NSString).lastPathComponent.lowercased()) }
         }
@@ -506,6 +667,7 @@ final class AppModel: ObservableObject {
         t.state = .rechecking
         t.stageChanged()
         t.job?.stage = stageHandler(t)
+        startLog(t, mode == .full ? "Resume Safely" : "Quick Check & Resume")
         run(t) { $0.resume(mode) }
     }
 
@@ -522,6 +684,7 @@ final class AppModel: ObservableObject {
         t.state = .rechecking
         t.stageChanged()
         job.stage = stageHandler(t)
+        startLog(t, "Finishing without \(t.volume(d))")
         run(t) { $0.resume(.full, leaveOut: [d]) }
     }
 
@@ -533,6 +696,7 @@ final class AppModel: ObservableObject {
         a.addButton(withTitle: "Keep Waiting")
         guard a.runModal() == .alertFirstButtonReturn else { return }
         t.state = .report
+        startLog(t, "Stopped here (the rest left uncopied)")
         run(t) { $0.giveUp() }
     }
 
@@ -552,6 +716,7 @@ final class AppModel: ObservableObject {
     func togglePause(_ t: Transfer) {
         t.paused.toggle()
         t.control.paused = t.paused
+        t.log?.line(t.paused ? "Paused" : "Carried on after a pause")
     }
 
     func cancel(_ t: Transfer) {
@@ -567,6 +732,7 @@ final class AppModel: ObservableObject {
         a.addButton(withTitle: "Cancel Transfer")
         a.addButton(withTitle: "Keep Going")
         guard a.runModal() == .alertFirstButtonReturn else { return }
+        t.log?.line("Canceled by the person using Clone Ranger")
         t.control.cancelled = true
         t.control.paused = false
     }

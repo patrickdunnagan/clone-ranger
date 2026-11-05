@@ -171,6 +171,20 @@ enum Fmt {
         return url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }
 
+    /// "Horizon › Projects": the drive or server, then the folders down to here (the last few if it's deep).
+    static func place(_ url: URL, includeVolume: Bool = true) -> String {
+        let vol = (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume?.standardizedFileURL.path ?? "/"
+        let path = url.standardizedFileURL.path
+        var rel = path.hasPrefix(vol) ? String(path.dropFirst(vol.count)) : path
+        if vol == "/" && rel.hasPrefix(String(NSHomeDirectory().dropFirst())) {
+            rel = "~" + rel.dropFirst(NSHomeDirectory().count - 1)
+        }
+        var parts = rel.split(separator: "/").map(String.init)
+        if parts.count > 4 { parts = ["…"] + parts.suffix(3) }
+        if includeVolume { parts.insert(volumeName(url), at: 0) }
+        return parts.isEmpty ? "" : (includeVolume ? "" : "› ") + parts.joined(separator: " › ")
+    }
+
     /// "HVP SSD 07", or "Macintosh HD" for the Mac's own drive.
     static func volumeName(_ url: URL) -> String {
         (try? url.resourceValues(forKeys: [.volumeLocalizedNameKey]))?.volumeLocalizedName ?? "Macintosh HD"
