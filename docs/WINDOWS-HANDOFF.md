@@ -68,7 +68,9 @@ Destinations are always fully re-checked either way.
 **Reports.** "<folder> Reports" next to each copy, named "<folder> YYMMDD-HHMM.pdf". Contents: what, from where,
 to where, when, totals, result per destination, every file with size and checksum, anything flagged
 (clashes renamed, already there, failed, retried), and one frame grab per video clip. Optional setting: also save a
-CSV checksum list next to the PDF. See `samples/` on the server for real report PDFs.
+CSV checksum list next to the PDF. The report also says who ran it and on which computer (the
+Windows user's full name and PC name). `Sources/CloneRanger/Report.swift` is the reference for the layout; ask
+Patrick to send a real report from the Mac to match.
 
 **Logs.** One log per transfer: version, Windows version, hardware, every stage, every error, a progress line every
 60 s, outcome. Kept in %LOCALAPPDATA%\Clone Ranger\Logs (newest 100), plus a copy next to each PDF as
@@ -111,7 +113,7 @@ Colors (hex):
 | Canceled | tan #B08A62 |
 | Queued | grey #8A8A8A |
 
-Mockups and report samples: on the server in Clone Ranger for Windows › samples.
+Mockups of the current layout: on the server in Clone Ranger for Windows › mockups.
 
 ## Build order
 
