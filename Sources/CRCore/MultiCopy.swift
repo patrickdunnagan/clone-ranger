@@ -18,6 +18,8 @@ public enum MultiCopy {
     public static let partialSuffix = ".cloneranger-partial"
     /// Test only: caps the read speed (bytes per second) so screenshots can catch a transfer mid-way.
     nonisolated(unsafe) public static var throttle: Double = 0
+    /// Test only (screenshots): bytes per second each verify read is slowed to. 0 = full speed.
+    nonisolated(unsafe) public static var verifyThrottle: Double = 0
     /// Read the source through the memory cache. The cache's read-ahead is much faster on USB SSDs
     /// (980 vs 700 MB/s measured on HVP SSD 07); the checksum is still taken from what was read.
     nonisolated(unsafe) public static var sourceCached = true
@@ -268,8 +270,13 @@ public enum MultiCopy {
         var errs = [Int32](repeating: 0, count: d)
         var hasher = XXHash64()
         var offset: Int64 = 0
+        let started = Date()
         while true {
             if let control, !control.checkpoint() { throw CopyError.cancelled }
+            if verifyThrottle > 0 {
+                let ahead = Double(offset) / verifyThrottle - Date().timeIntervalSince(started)
+                if ahead > 0 { Thread.sleep(forTimeInterval: ahead) }
+            }
             // Read the next `d` chunks at the same time, then hash them in order.
             DispatchQueue.concurrentPerform(iterations: d) { j in
                 let at = offset + Int64(j) * Int64(chunk)

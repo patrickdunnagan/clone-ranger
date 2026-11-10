@@ -30,4 +30,4 @@ Engine notes
 Test tools
 - `cr-cli <source> <dest>…` headless transfer; `--hash`, `--write`, `--resident` benchmarks.
 - App env vars: `CR_AUTOPLAY="src|dest|…"` + `CR_SNAP_DIR` (screenshots), `CR_THROTTLE` (MB/s),
-  `CR_TEST_CORRUPT`, `CR_TEST_CORRUPT_ALWAYS`, `CR_TEST_PAUSE`, `CR_TEST_CANCEL`, `CR_AUTOPLAY_RESUME`, `CR_AUTOPLAY_REOPEN`, `CR_JOURNAL_DIR`, `CR_TEST_FRAMES=<folder>`, `CR_MAKE_ICON=<png>`, `CR_DEMO_USER` / `CR_DEMO_RUN_BY` (stand-in names for screenshots).
+  `CR_TEST_CORRUPT`, `CR_TEST_CORRUPT_ALWAYS`, `CR_TEST_PAUSE`, `CR_TEST_CANCEL`, `CR_AUTOPLAY_RESUME`, `CR_AUTOPLAY_REOPEN`, `CR_JOURNAL_DIR`, `CR_TEST_FRAMES=<folder>`, `CR_MAKE_ICON=<png>`, `CR_DEMO_USER` / `CR_DEMO_RUN_BY` (stand-in names for screenshots), `CR_THROTTLE_VERIFY` (MB/s per verify read).
