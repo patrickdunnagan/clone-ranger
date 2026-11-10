@@ -47,7 +47,8 @@ final class Places: ObservableObject {
     func reload() {
         let fm = FileManager.default
         let homeURL = fm.homeDirectoryForCurrentUser
-        var h = [Place(url: homeURL, name: NSUserName(), kind: .home)]
+        // Screenshots: CR_DEMO_USER="<name>" shows that instead of the Mac's user name.
+        var h = [Place(url: homeURL, name: ProcessInfo.processInfo.environment["CR_DEMO_USER"] ?? NSUserName(), kind: .home)]
         for (dir, name) in [(FileManager.SearchPathDirectory.desktopDirectory, "Desktop"), (.documentDirectory, "Documents"),
                             (.moviesDirectory, "Movies"), (.downloadsDirectory, "Downloads")] {
             if let u = fm.urls(for: dir, in: .userDomainMask).first { h.append(Place(url: u, name: name, kind: .home)) }

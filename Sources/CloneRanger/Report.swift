@@ -152,7 +152,8 @@ enum ReportWriter {
             ("Copy", "\(Fmt.duration(copySecs)) · \(Fmt.rate(Double(o.scan.bytes) / max(copySecs, 0.001))) from the source"),
             ("Verify", Fmt.duration(verifySecs)),
             ("Checksum", "xxHash64, read once from the source, then every copy read back from its drive and compared"),
-            ("Run by", "\(NSFullUserName()) on \(Host.current().localizedName ?? "this Mac")"),
+            ("Run by", ProcessInfo.processInfo.environment["CR_DEMO_RUN_BY"]   // screenshots: a stand-in name
+                ?? "\(NSFullUserName()) on \(Host.current().localizedName ?? "this Mac")"),
         ]
         for (k, v) in rows {
             pdf.text(k, x: X, y: pdf.y, size: 9, weight: .semibold, color: gray)
