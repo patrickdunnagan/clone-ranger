@@ -140,7 +140,9 @@ struct Composer: View {
                 Card {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         SectionLabel(text: "Copy from")
-                        Text(Fmt.place(model.draftItems == nil ? src.deletingLastPathComponent() : src))
+                        // Where it's from: "Horizon › Projects", or "the whole card" when a card itself was dropped.
+                        let isCard = model.draftItems == nil && (try? src.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true
+                        Text(isCard ? "the whole card" : Fmt.place(model.draftItems == nil ? src.deletingLastPathComponent() : src))
                             .font(.system(size: 12)).foregroundStyle(T.label3).lineLimit(1).truncationMode(.head)
                         Spacer()
                         Button { model.clearDraft() } label: { Text("Clear") }
@@ -185,7 +187,7 @@ struct Composer: View {
             ?? Transfer.autoName(source: src, items: nil, folder: Plan.sourceName(src))
         HStack(spacing: 10) {
             Text("Name").font(.system(size: 12, weight: .medium)).foregroundStyle(T.label2)
-            TextField("", text: $model.draftName, prompt: Text("Optional, like A001 or FX6 Card 1 · otherwise “\(auto)”").foregroundStyle(T.label3))
+            TextField("", text: Binding(get: { model.draftName }, set: { model.typedName($0) }), prompt: Text("Optional, like A001 or FX6 Card 1 · otherwise “\(auto)”").foregroundStyle(T.label3))
                 .textFieldStyle(.plain)
                 .font(.system(size: 12.5))
                 .padding(.horizontal, 8).padding(.vertical, 5)
@@ -194,6 +196,11 @@ struct Composer: View {
                 .onSubmit { if model.draftReady { model.commit() } }
         }
         .help("A label for this transfer in Clone Ranger, notifications and the report. The folders on the drives keep their names.")
+        if model.draftNameIsAuto, let r = model.draftReel {
+            Text("Reel \(r.name) found on the card (\(r.why)). Type over it to name it something else.")
+                .font(.system(size: 11)).foregroundStyle(T.label3)
+                .padding(.leading, 46).padding(.top, -4)
+        }
     }
 
     @ViewBuilder private func addMore(_ src: URL) -> some View {

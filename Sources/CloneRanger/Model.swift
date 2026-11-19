@@ -263,7 +263,7 @@ final class AppModel: ObservableObject {
     @Published var draftSource: URL?
     @Published var draftDests: [URL] = []
     @Published var draftItems: [String]?    // selected files/folders inside draftSource; nil = the whole folder
-    @Published var draftScan: ScanResult?
+    @Published var draftScan: ScanResult? { didSet { suggestName() } }
     @Published var draftScanning = false
     @Published var notice: String?
     /// The transfer that just finished, shown as a banner over a fresh "ready for the next one" area.
@@ -276,8 +276,11 @@ final class AppModel: ObservableObject {
     @AppStorage("largeReportFrames") var largeReportFrames = false
     /// 0 = PDF with clip frames (default), 1 = PDF without frames (faster), 2 = no report.
     @AppStorage("reportMode") var reportMode = 0
-    /// Optional name typed for the transfer being set up.
+    /// Optional name for the transfer being set up: typed, or filled in from the card's reel name.
     @Published var draftName = ""
+    /// The reel name found on the card ("A301"), and whether the Name box still holds it untouched.
+    @Published var draftReel: Reel.Found?
+    @Published var draftNameIsAuto = false
 
     static let maxDestinations = 4
     private var timer: Timer?
@@ -554,7 +557,24 @@ final class AppModel: ObservableObject {
     }
 
     func clearDraft() {
-        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil; draftStats = [:]; draftName = ""
+        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil; draftStats = [:]; draftName = ""; draftReel = nil; draftNameIsAuto = false
+    }
+
+    /// Fills the Name box with the card's reel name ("A301"), unless someone has typed their own.
+    private func suggestName() {
+        guard let scan = draftScan else { return }
+        let found = Reel.detect(scan)
+        draftReel = found
+        if draftName.isEmpty || draftNameIsAuto {
+            draftName = found?.name ?? ""
+            draftNameIsAuto = found != nil
+        }
+    }
+
+    /// The Name box was typed in: from now on it's the person's, not the card's.
+    func typedName(_ s: String) {
+        draftName = s
+        draftNameIsAuto = false
     }
 
     /// Bytes this draft would put on each destination's drive, counting other destinations on the same drive.
