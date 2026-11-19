@@ -33,7 +33,7 @@ struct RightColumn: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
             ForEach(items) { t in
-                TransferRow(t: t, selected: model.selected == t.id)
+                TransferRow(t: t, selected: model.selected == t.id) { model.selected = t.id }
                     .onTapGesture { model.selected = t.id }
                     .contextMenu { TransferMenu(t: t) }
             }
@@ -44,15 +44,12 @@ struct RightColumn: View {
 struct TransferRow: View {
     @ObservedObject var t: Transfer
     let selected: Bool
+    var select: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text(t.displayName)
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundStyle(T.label)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                EditableName(t: t, selected: selected, font: .system(size: 13.5, weight: .semibold), select: select)
                 Spacer(minLength: 4)
                 Pill(text: t.label, color: t.color)
             }
@@ -156,5 +153,62 @@ struct TransferMenu: View {
         Divider()
         Button("Rename…") { model.rename(t) }
         Button("Show Details") { model.selected = t.id }
+    }
+}
+
+/// A transfer's name that renames like a Finder file: click it once to select the transfer, click it again a
+/// moment later and it becomes a text box. Enter saves, Esc cancels, clicking elsewhere saves. A double-click
+/// never starts a rename.
+struct EditableName: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var t: Transfer
+    let selected: Bool
+    let font: Font
+    var select: () -> Void = {}
+    @State private var editing = false
+    @State private var draft = ""
+    @State private var pending: Task<Void, Never>?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        if editing {
+            TextField("", text: $draft, prompt: Text(t.autoName))
+                .textFieldStyle(.plain)
+                .font(font)
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.08)))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(T.blue, lineWidth: 1.5))
+                .focused($focused)
+                .onSubmit { finish(save: true) }
+                .onExitCommand { finish(save: false) }
+                .onChange(of: focused) { _, now in if !now && editing { finish(save: true) } }
+                .onAppear { DispatchQueue.main.async { focused = true } }
+        } else {
+            Text(t.displayName)
+                .font(font)
+                .foregroundStyle(T.label)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { pending?.cancel(); select() }
+                .onTapGesture(count: 1) {
+                    guard selected else { select(); return }
+                    // Second click on an already-selected name: rename after a short pause, like the Finder.
+                    pending?.cancel()
+                    pending = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(350))
+                        guard !Task.isCancelled else { return }
+                        draft = t.customName ?? ""
+                        editing = true
+                    }
+                }
+                .help("Click again to rename")
+        }
+    }
+
+    private func finish(save: Bool) {
+        guard editing else { return }
+        editing = false
+        if save { model.setName(t, draft) }
     }
 }

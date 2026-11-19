@@ -524,7 +524,12 @@ final class AppModel: ObservableObject {
         a.addButton(withTitle: "Rename")
         a.addButton(withTitle: "Cancel")
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        let new = Self.cleanName(field.stringValue)
+        setName(t, field.stringValue)
+    }
+
+    /// Saves a new name typed for a transfer (from Rename…, the pencil, or click-to-rename). Empty = no name.
+    func setName(_ t: Transfer, _ typed: String) {
+        let new = Self.cleanName(typed)
         guard new != t.customName else { return }
         t.customName = new
         t.log?.line("Renamed: \(new ?? t.autoName)")

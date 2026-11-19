@@ -477,7 +477,7 @@ struct TransferDetail: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text(t.displayName).font(.system(size: 20, weight: .bold)).foregroundStyle(T.label).lineLimit(1)
+            EditableName(t: t, selected: true, font: .system(size: 20, weight: .bold))
             Button { model.rename(t) } label: { Image(systemName: "pencil").font(.system(size: 12)) }
                 .buttonStyle(.plain).foregroundStyle(T.label3).help("Name this transfer")
             Pill(text: t.label, color: t.color)
