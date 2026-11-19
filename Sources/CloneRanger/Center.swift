@@ -166,6 +166,7 @@ struct Composer: View {
                         }
                         .font(.system(size: 12))
                     }
+                    nameField(src)
                     addMore(src)
                 }
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(T.blue, lineWidth: sourceHover ? 2 : 0))
@@ -176,6 +177,23 @@ struct Composer: View {
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $sourceHover) { droppedAll($0) { model.addSources($0) } }
+    }
+
+    /// Optional name for the transfer ("A001"), shown instead of the folder name; the folders keep their names.
+    @ViewBuilder private func nameField(_ src: URL) -> some View {
+        let auto = model.draftItems.map { "\(Fmt.count($0.count, "item")) from \(Plan.sourceName(src))" }
+            ?? Transfer.autoName(source: src, items: nil, folder: Plan.sourceName(src))
+        HStack(spacing: 10) {
+            Text("Name").font(.system(size: 12, weight: .medium)).foregroundStyle(T.label2)
+            TextField("", text: $model.draftName, prompt: Text("Optional, like A001 or FX6 Card 1 · otherwise “\(auto)”").foregroundStyle(T.label3))
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(T.sep))
+                .onSubmit { if model.draftReady { model.commit() } }
+        }
+        .help("A label for this transfer in Clone Ranger, notifications and the report. The folders on the drives keep their names.")
     }
 
     @ViewBuilder private func addMore(_ src: URL) -> some View {
@@ -418,7 +436,7 @@ struct TransferDetail: View {
                 batteryWarning
                 Card {
                     SectionLabel(text: "Copy from")
-                    Text(t.selectionNote ?? t.displayName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
+                    Text(t.selectionNote ?? t.autoName).font(.system(size: 17, weight: .semibold)).foregroundStyle(T.label)
                     Text(t.source.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(T.label2)
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Text("\(Fmt.count(t.totalFiles, "file")) · \(Fmt.bytes(t.totalBytes))")
@@ -452,7 +470,9 @@ struct TransferDetail: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text(t.displayName).font(.system(size: 20, weight: .bold)).foregroundStyle(T.label)
+            Text(t.displayName).font(.system(size: 20, weight: .bold)).foregroundStyle(T.label).lineLimit(1)
+            Button { model.rename(t) } label: { Image(systemName: "pencil").font(.system(size: 12)) }
+                .buttonStyle(.plain).foregroundStyle(T.label3).help("Name this transfer")
             Pill(text: t.label, color: t.color)
             Spacer()
             if t.state.running {
@@ -662,7 +682,7 @@ extension TransferDetail {
 
     /// A drive yanked mid-write can have a damaged file index, not just a half-written file.
     @ViewBuilder var firstAidNote: some View {
-        let yanked = (t.outcome?.events ?? []).filter { $0.bad && $0.text.contains("disappeared") && !$0.text.hasPrefix(t.displayName) }
+        let yanked = (t.outcome?.events ?? []).filter { $0.bad && $0.text.contains("disappeared") && !$0.text.hasPrefix(t.folderName) }
         if !yanked.isEmpty {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "stethoscope").foregroundStyle(T.amber)

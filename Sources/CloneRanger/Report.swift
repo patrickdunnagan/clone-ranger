@@ -13,6 +13,7 @@ struct ReportData: @unchecked Sendable {
     var reportFolders: [String]    // where each destination's report goes
     var reportBase: String         // start of the report's file name
     var volumes: [String]          // drive names, remembered while plugged in
+    var name: String?              // the name typed for the transfer ("A001"), if any
 
     @MainActor init(_ t: Transfer) {
         source = t.source.path
@@ -24,10 +25,20 @@ struct ReportData: @unchecked Sendable {
         reportFolders = t.targetPaths.indices.map { t.job?.reportsFolder($0) ?? t.targetPaths[$0] + " Reports" }
         reportBase = t.job?.reportBase ?? t.sourceName
         volumes = t.targetPaths.indices.map { t.volume($0) }
+        name = t.customName
+        // A typed name leads the report's file name too: "A001 · CLIP 261119-0931.pdf".
+        if let n = t.customName { reportBase = ReportWriter.safeName(n) + " · " + reportBase }
     }
 }
 
 enum ReportWriter {
+    /// A typed name made safe for a file name: no slashes or colons, no leading dot.
+    static func safeName(_ s: String) -> String {
+        var t = s.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        while t.hasPrefix(".") { t.removeFirst() }
+        return t.isEmpty ? "Transfer" : t
+    }
+
     static var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
@@ -60,9 +71,9 @@ enum ReportWriter {
     }
 
     /// Grabs the clip frames once, then writes the same report into every destination.
-    static func writeAll(_ d: ReportData, csv: Bool, compactClips: Bool = true) async -> ([URL?], String?) {
+    static func writeAll(_ d: ReportData, csv: Bool, compactClips: Bool = true, frames: Bool = true) async -> ([URL?], String?) {
         let o = d.outcome
-        let clips = o.results.filter { $0.item.kind == .file && FrameGrab.isClip($0.item.path) && $0.hash != nil }
+        let clips = frames ? o.results.filter { $0.item.kind == .file && FrameGrab.isClip($0.item.path) && $0.hash != nil } : []
         var stills: [String: FrameGrab.Still] = [:]
         // Four at a time, from a verified copy so the card isn't read again.
         for batch in stride(from: 0, to: clips.count, by: 4).map({ Array(clips[$0..<min($0 + 4, clips.count)]) }) {
@@ -83,7 +94,7 @@ enum ReportWriter {
             let path = reportPath(folder: d.reportFolders[i], name: d.reportBase, date: now, ext: "pdf")
             do {
                 try FS.makeFolders((path as NSString).deletingLastPathComponent)
-                try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path), compactClips: compactClips,
+                try writePDF(d, stills: stills, thisDestination: i, date: now, to: exactURL(path), compactClips: compactClips, frames: frames,
                              clipsAcross: Int(ProcessInfo.processInfo.environment["CR_CLIPS_ACROSS"] ?? "") ?? 5)
                 if csv { try writeCSV(d, to: exactURL(String(path.dropLast(4)) + ".csv")) }
                 urls.append(exactURL(path))
@@ -112,8 +123,8 @@ enum ReportWriter {
     // MARK: PDF
 
     static func writePDF(_ d: ReportData, stills: [String: FrameGrab.Still], thisDestination: Int, date: Date, to url: URL,
-                         compactClips: Bool = true, clipsAcross: Int = 5) throws {
-        let pdf = PDFBuilder(url: url, footer: "Clone Ranger \(appVersion) · \(d.sourceName)")
+                         compactClips: Bool = true, frames: Bool = true, clipsAcross: Int = 5) throws {
+        let pdf = PDFBuilder(url: url, footer: "Clone Ranger \(appVersion) · " + (d.name.map { "\($0) · " } ?? "") + d.sourceName)
         guard let pdf else { throw CocoaError(.fileWriteUnknown) }
         let o = d.outcome
         let files = o.results.filter { $0.item.kind != .folder }
@@ -127,7 +138,8 @@ enum ReportWriter {
         // Header.
         Logo.draw(in: pdf.ctx, rect: pdf.rect(x: X, y: pdf.y, w: 58, h: 45))
         pdf.text("Clone Ranger Transfer Report", x: X + 70, y: pdf.y + 4, size: 18, weight: .bold, color: ink)
-        pdf.text(d.sourceName, x: X + 70, y: pdf.y + 27, size: 12, weight: .medium, color: gray)
+        // The typed name, when there is one, with the folder it copied beside it: "A001  ·  CLIP".
+        pdf.text(d.name.map { "\($0)  ·  \(d.sourceName)" } ?? d.sourceName, x: X + 70, y: pdf.y + 27, size: 12, weight: .medium, color: gray)
         pdf.y += 56
 
         let (status, color): (String, CGColor) =
@@ -143,7 +155,7 @@ enum ReportWriter {
 
         let copySecs = o.copyFinished.timeIntervalSince(o.copyStarted)
         let verifySecs = o.verifyFinished.timeIntervalSince(o.copyFinished)
-        let rows: [(String, String)] = [
+        let rows: [(String, String)] = (d.name.map { [("Transfer name", $0)] } ?? []) + [
             ("Report created", date.formatted(date: .long, time: .shortened)),
             ("Transfer started", d.started.formatted(date: .long, time: .shortened)),
             ("Source", d.selection.map { "\($0): \(d.source)" } ?? d.source),
@@ -285,7 +297,9 @@ enum ReportWriter {
         func meta(_ r: ItemResult, _ s: FrameGrab.Still?) -> String {
             [s?.duration.map { Fmt.timecode($0) }, s?.dimensions, Fmt.bytes(r.item.size)].compactMap { $0 }.joined(separator: " · ")
         }
-        if !clips.isEmpty && compactClips {
+        if !frames && !clips.isEmpty {
+            // Frames turned off in Settings: the clips are still in the file list below.
+        } else if !clips.isEmpty && compactClips {
             pdf.y += 8
             pdf.heading("Clips (\(clips.count))", color: ink)
             // Small frames in a grid, name and details under each; a long clip's two frames take two places.

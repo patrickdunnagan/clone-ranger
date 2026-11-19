@@ -74,9 +74,32 @@ final class Transfer: ObservableObject, Identifiable {
         interruptedBy = "Clone Ranger quit before this finished"
     }
 
-    var displayName: String { job?.sourceName ?? sourceName }
+    /// A name typed for this transfer ("A001", "FX6 Card 1"). Only a label: the folders keep their names.
+    @Published var customName: String?
+    /// The folder or card being copied ("CLIP", "A001").
+    var folderName: String { job?.sourceName ?? sourceName }
+    /// Cameras give every card the same folder names, so for those the card's name goes in front: "FX6 A › CLIP".
+    var autoName: String { Self.autoName(source: source, items: items, folder: folderName) }
+    static func autoName(source: URL, items: [String]?, folder: String) -> String {
+        guard items == nil, genericFolders.contains(folder.uppercased()),
+              let vol = try? source.resourceValues(forKeys: [.volumeURLKey]).volume, vol.standardizedFileURL != source.standardizedFileURL
+        else { return folder }
+        return Fmt.volumeName(source) + " › " + folder
+    }
+    static let genericFolders: Set<String> = ["CLIP", "CLIPS", "DCIM", "PRIVATE", "XDROOT", "M4ROOT", "AVCHD", "BPAV", "CONTENTS",
+                                              "STREAM", "SUB", "MEDIA", "FOOTAGE", "VIDEO", "CAMERA", "100MEDIA", "100CANON",
+                                              "100MSDCF", "100GOPRO", "100_PANA", "100NIKON", "UNTITLED"]
+    var displayName: String { customName ?? autoName }
     /// "7 items from 100MEDIA" for a selection, nil for a whole folder or card.
-    var selectionNote: String? { items.map { "\(Fmt.count($0.count, "item")) from \(displayName)" } }
+    var selectionNote: String? { items.map { "\(Fmt.count($0.count, "item")) from \(folderName)" } }
+    /// "→ SHUTTLE 01 › Day 2" for one drive, "→ SHUTTLE 01, RAID 02" for more.
+    var destinationSummary: String {
+        if parents.count == 1 {
+            let folder = parents[0].lastPathComponent, vol = volume(0)
+            return "→ " + (folder == vol || parents[0].path == "/" ? vol : "\(vol) › \(folder)")
+        }
+        return "→ " + parents.indices.map { volume($0) }.joined(separator: ", ")
+    }
     func volume(_ d: Int) -> String { job?.targetVolumes[d] ?? Fmt.volumeName(parents[d]) }
 
     /// What the colored pill and fill bar show.
@@ -251,6 +274,10 @@ final class AppModel: ObservableObject {
     @AppStorage("transfersAtOnce") var transfersAtOnce = 1
     @AppStorage("saveCSV") var saveCSV = false
     @AppStorage("largeReportFrames") var largeReportFrames = false
+    /// 0 = PDF with clip frames (default), 1 = PDF without frames (faster), 2 = no report.
+    @AppStorage("reportMode") var reportMode = 0
+    /// Optional name typed for the transfer being set up.
+    @Published var draftName = ""
 
     static let maxDestinations = 4
     private var timer: Timer?
@@ -463,6 +490,45 @@ final class AppModel: ObservableObject {
         return transfers.first { t in !t.state.finished && (on(t.source) || t.parents.contains(where: on)) }
     }
 
+    /// The card or drive a transfer copied from, if it's still plugged in and can be ejected.
+    func sourceVolume(of t: Transfer) -> (url: URL, name: String)? {
+        let keys: Set<URLResourceKey> = [.volumeURLKey, .volumeIsEjectableKey, .volumeIsRemovableKey, .volumeIsInternalKey, .volumeLocalizedNameKey]
+        guard FileManager.default.fileExists(atPath: t.source.path),
+              let v = try? t.source.resourceValues(forKeys: keys), let vol = v.volume, vol.path != "/",
+              v.volumeIsEjectable == true || v.volumeIsRemovable == true || v.volumeIsInternal != true,
+              !(v.volumeIsInternal == true && v.volumeIsEjectable != true) else { return nil }
+        return (vol, v.volumeLocalizedName ?? vol.lastPathComponent)
+    }
+
+    // MARK: Names
+
+    /// A typed name, tidied: nil when it's empty.
+    static func cleanName(_ s: String) -> String? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\n", with: " ")
+        return t.isEmpty ? nil : String(t.prefix(60))
+    }
+
+    /// Right-click → Rename: a label for the transfer (its folders keep their names).
+    func rename(_ t: Transfer) {
+        let a = NSAlert()
+        a.messageText = "Name this transfer"
+        a.informativeText = "For example A001, B002 or FX6 Card 1. It's shown in Clone Ranger, notifications and the report. The folders on the drives keep their names."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = t.customName ?? ""
+        field.placeholderString = t.autoName
+        a.accessoryView = field
+        a.window.initialFirstResponder = field
+        a.addButton(withTitle: "Rename")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let new = Self.cleanName(field.stringValue)
+        guard new != t.customName else { return }
+        t.customName = new
+        t.log?.line("Renamed: \(new ?? t.autoName)")
+        if !t.state.finished { Journal.save(t) }
+        objectWillChange.send()
+    }
+
     /// Unmounts and ejects a drive or card (off the main thread: it can take a few seconds).
     func eject(_ volume: URL, name: String) {
         if let t = transferUsing(volume: volume) {
@@ -488,7 +554,7 @@ final class AppModel: ObservableObject {
     }
 
     func clearDraft() {
-        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil; draftStats = [:]
+        draftSource = nil; draftItems = nil; draftDests = []; draftScan = nil; draftScanning = false; notice = nil; draftStats = [:]; draftName = ""
     }
 
     /// Bytes this draft would put on each destination's drive, counting other destinations on the same drive.
@@ -520,6 +586,7 @@ final class AppModel: ObservableObject {
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
         let t = Transfer(source: src, parents: draftDests, items: draftItems, bytes: scan.bytes, files: scan.files)
+        t.customName = Self.cleanName(draftName)
         watch(t)
         transfers.append(t)
         selected = t.id
@@ -574,7 +641,8 @@ final class AppModel: ObservableObject {
         let log = t.log ?? TransferLog(name: t.displayName)
         t.log = log
         t.job?.log = { log.line($0) }
-        log.line("\(what): \(t.selectionNote ?? t.displayName) from \(t.source.path)")
+        log.line("\(what): \(t.selectionNote ?? t.folderName) from \(t.source.path)")
+        if let n = t.customName { log.line("  named \(n)") }
         for (d, p) in t.parents.enumerated() { log.line("  to \(d < t.targetPaths.count ? t.targetPaths[d] : p.path)") }
     }
 
@@ -633,7 +701,10 @@ final class AppModel: ObservableObject {
         t.stageChanged()
         let data = ReportData(t)
         let csv = saveCSV, compact = !largeReportFrames && ProcessInfo.processInfo.environment["CR_LARGE_FRAMES"] == nil
-        let (reports, problem) = await Task.detached { await ReportWriter.writeAll(data, csv: csv, compactClips: compact) }.value
+        let mode = Int(ProcessInfo.processInfo.environment["CR_REPORT_MODE"] ?? "") ?? reportMode   // test: 0, 1 or 2
+        let (reports, problem): ([URL?], String?) = mode == 2 ? ([], nil)
+            : await Task.detached { await ReportWriter.writeAll(data, csv: csv, compactClips: compact, frames: mode == 0) }.value
+        if mode == 2 { t.log?.line("No report: reports are turned off in Settings") }
         t.reports = reports
         t.reportProblem = problem
         t.finished = Date()
@@ -705,6 +776,7 @@ final class AppModel: ObservableObject {
         guard Journal.claim() else { return }   // another Clone Ranger is running and owns them
         for (id, st) in Journal.loadAll() where !transfers.contains(where: { $0.id == id }) {
             let t = Transfer(unfinished: st, id: id)
+            t.customName = Journal.name(for: id)
             t.waitingFor = t.job?.waitingFor()
             for (p, target) in zip(t.parents, t.targetPaths) { reserved[p.path, default: []].insert((target as NSString).lastPathComponent.lowercased()) }
             watch(t)

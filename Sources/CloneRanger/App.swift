@@ -165,11 +165,22 @@ struct SettingsView: View {
             }
             Text("One at a time is usually fastest: transfers that share a drive slow each other down.")
                 .font(.caption).foregroundStyle(.secondary)
+            Picker("Reports", selection: $model.reportMode) {
+                Text("PDF with a frame from each clip").tag(0)
+                Text("PDF without frames (faster)").tag(1)
+                Text("Off: no report on the drives").tag(2)
+            }
+            if model.reportMode == 2 {
+                Text("Every file is still read back and verified. The log of each transfer stays on this Mac (Help › Show Logs).")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             Toggle("Also save a CSV checksum list next to each PDF report", isOn: $model.saveCSV)
+                .disabled(model.reportMode == 2)
             Picker("Clip frames in the report", selection: $model.largeReportFrames) {
                 Text("Compact: two columns, small frames").tag(false)
                 Text("Large: three across").tag(true)
             }
+            .disabled(model.reportMode != 0)
         }
         .formStyle(.grouped)
         .frame(width: 460)

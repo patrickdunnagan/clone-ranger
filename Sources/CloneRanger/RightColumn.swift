@@ -79,7 +79,7 @@ struct TransferRow: View {
 
     private var meta: String {
         if t.state.running, !t.paused, !t.snap.note.isEmpty { return t.snap.note }
-        let drives = "→ \(Fmt.count(t.parents.count, "drive"))"
+        let drives = t.destinationSummary
         switch t.state {
         case .queued:
             return [Fmt.bytes(t.totalBytes), drives].joined(separator: " · ")
@@ -134,6 +134,14 @@ struct TransferMenu: View {
             Divider()
             Button("Stop Here…") { model.stopHere(t) }
         } else if t.state.finished {
+            if let (vol, name) = model.sourceVolume(of: t) {
+                if let other = model.transferUsing(volume: vol) {
+                    Button("Can't Eject \(name): \(other.displayName) needs it") {}.disabled(true)
+                } else {
+                    Button("Eject \(name)") { model.eject(vol, name: name) }
+                }
+                Divider()
+            }
             ForEach(Array(t.reports.enumerated()), id: \.offset) { d, r in
                 if let r { Button(t.parents.count > 1 ? "Open Report on \(t.volume(d))" : "Open Report") { NSWorkspace.shared.open(r) } }
             }
@@ -146,6 +154,7 @@ struct TransferMenu: View {
             }
         }
         Divider()
+        Button("Rename…") { model.rename(t) }
         Button("Show Details") { model.selected = t.id }
     }
 }

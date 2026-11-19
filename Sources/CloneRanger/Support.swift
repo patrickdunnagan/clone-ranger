@@ -24,6 +24,7 @@ enum Journal {
         saving.insert(t.id)
         let id = t.id
         let url = folder.appendingPathComponent(t.id.uuidString + ".json")
+        saveName(t)
         Task.detached(priority: .utility) {
             if let data = try? JSONEncoder().encode(job.state) { try? data.write(to: url, options: .atomic) }
             await MainActor.run { _ = saving.remove(id) }
@@ -34,10 +35,22 @@ enum Journal {
     static func saveNow(_ t: Transfer) {
         guard let job = t.job, let data = try? JSONEncoder().encode(job.state) else { return }
         try? data.write(to: folder.appendingPathComponent(t.id.uuidString + ".json"), options: .atomic)
+        saveName(t)
+    }
+
+    /// A transfer's typed name lives next to its progress file ("<id>.name"), so it survives a quit.
+    private static func saveName(_ t: Transfer) {
+        let url = folder.appendingPathComponent(t.id.uuidString + ".name")
+        if let n = t.customName { try? n.write(to: url, atomically: true, encoding: .utf8) } else { try? FileManager.default.removeItem(at: url) }
+    }
+
+    static func name(for id: UUID) -> String? {
+        (try? String(contentsOf: folder.appendingPathComponent(id.uuidString + ".name"), encoding: .utf8)).flatMap(AppModel.cleanName)
     }
 
     static func remove(_ t: Transfer) {
         try? FileManager.default.removeItem(at: folder.appendingPathComponent(t.id.uuidString + ".json"))
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(t.id.uuidString + ".name"))
     }
 
     /// Only one running Clone Ranger may pick up unfinished transfers: the first to start holds this lock

@@ -72,6 +72,8 @@ enum Autoplay {
             for d in parts.dropFirst() { model.addDestination(d) }
             while model.draftScan == nil { try? await Task.sleep(for: .milliseconds(100)) }
             try? await Task.sleep(for: .seconds(0.5))
+            // Test: CR_AUTOPLAY_NAME="<name>" types a name for the first transfer.
+            if let n = env["CR_AUTOPLAY_NAME"] { model.draftName = n; try? await Task.sleep(for: .seconds(0.3)) }
             snap(dir, "2 ready")
             model.commit()
             if let extra {
@@ -134,6 +136,9 @@ enum Autoplay {
             model.selected = model.history.first?.id
             try? await Task.sleep(for: .seconds(0.5))
             snap(dir, "5 done")
+            // What each finished transfer is called, and which card its right-click menu would offer to eject.
+            let names = model.history.map { t in "\(t.displayName) | auto=\(t.autoName) | eject=\(model.sourceVolume(of: t)?.name ?? "none") | \(t.destinationSummary) | reports=\(t.reports.compactMap { $0?.lastPathComponent })" }
+            try? names.joined(separator: "\n").write(to: dir.appendingPathComponent("names.txt"), atomically: true, encoding: .utf8)
             if let v = ejectVol {
                 ejectLog += "after done: using=\(model.transferUsing(volume: v)?.displayName ?? "nil")\n"
                 model.eject(v, name: v.lastPathComponent)
