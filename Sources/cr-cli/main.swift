@@ -21,6 +21,14 @@ if args.first == "--write", args.count >= 4 {
     print(String(format: "write %@ chunk %@MB %@: %.0f MB/s", args[2], args[3], args.count < 5 ? "nocache" : "cached", Double(done) / secs / 1e6))
     exit(0)
 }
+// cr-cli --reel <folder>...: the reel name Clone Ranger would suggest for each card or folder.
+if args.first == "--reel", args.count >= 2 {
+    for f in args.dropFirst() {
+        let r = Reel.detect(Scanner.scan(path: f, only: nil))
+        print("\(r.map { "\($0.name)  (\($0.why))" } ?? "none")  ←  \(f)")
+    }
+    exit(0)
+}
 if args.first == "--resident", args.count >= 2 {
     for f in args.dropFirst() { print(String(format: "%.4f  %@", MultiCopy.residentFraction(f), f)) }
     exit(0)
