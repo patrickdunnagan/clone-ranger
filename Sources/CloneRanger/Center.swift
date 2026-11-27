@@ -111,6 +111,8 @@ struct Composer: View {
     @EnvironmentObject var model: AppModel
     @State private var sourceHover = false
     @State private var destHover = false
+    @State private var itemsOpen: Bool? = nil    // nil = decide from the list's length
+    static let foldAfter = 8
 
     var body: some View {
         if model.draftSource == nil && model.draftDests.isEmpty {
@@ -149,9 +151,28 @@ struct Composer: View {
                             .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(T.label3).help("Start over")
                     }
                     if let items = model.draftItems {
-                        ForEach(items, id: \.self) { name in
-                            SourceItemRow(name: name, stat: model.draftStats[name], counting: model.draftScanning && model.draftStats[name] == nil,
-                                          isVolume: false) { model.removeSourceItem(name) }
+                        // Long lists (600 photos) fold away so the drives below are a short reach. Folded
+                        // automatically past a screenful; the caret opens it again.
+                        let open = itemsOpen ?? (items.count <= Self.foldAfter)
+                        Button { withAnimation(.easeInOut(duration: 0.15)) { itemsOpen = !open } } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .bold)).foregroundStyle(T.label2)
+                                    .rotationEffect(.degrees(open ? 90 : 0)).frame(width: 20)
+                                Text(itemSummary(items)).font(.system(size: 13, weight: .semibold)).foregroundStyle(T.label)
+                                Spacer()
+                                Text(open ? "Hide list" : "Show list").font(.system(size: 12)).foregroundStyle(T.label3)
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(open ? "Fold the list away" : "Show everything that was dropped")
+                        if open {
+                            ForEach(items, id: \.self) { name in
+                                SourceItemRow(name: name, stat: model.draftStats[name], counting: model.draftScanning && model.draftStats[name] == nil,
+                                              isVolume: false) { model.removeSourceItem(name) }
+                            }
                         }
                     } else {
                         let isVolume = (try? src.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true
@@ -179,6 +200,21 @@ struct Composer: View {
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $sourceHover) { droppedAll($0) { model.addSources($0) } }
+        .onChange(of: model.draftSource) { itemsOpen = nil }   // a new transfer decides afresh
+    }
+
+    /// "642 items dropped · 640 files, 2 folders" (the kinds once they've been counted).
+    private func itemSummary(_ items: [String]) -> String {
+        let stats = items.compactMap { model.draftStats[$0] }
+        var s = "\(Fmt.count(items.count, "item")) dropped"
+        if stats.count == items.count {
+            let folders = stats.filter(\.folder).count, files = stats.count - folders
+            var kinds: [String] = []
+            if files > 0 { kinds.append(Fmt.count(files, "file")) }
+            if folders > 0 { kinds.append(Fmt.count(folders, "folder")) }
+            if kinds.count > 1 || folders > 0 { s += " · " + kinds.joined(separator: ", ") }
+        }
+        return s
     }
 
     /// Optional name for the transfer ("A001"), shown instead of the folder name; the folders keep their names.
@@ -321,13 +357,15 @@ struct DestDraftRow: View {
             }
             if model.draftSource != nil {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(landing.prefix(14).enumerated()), id: \.offset) { _, leaf in
+                    let (shown, hidden, reports) = preview
+                    ForEach(Array(shown.enumerated()), id: \.offset) { _, leaf in
                         TreeLeaf(leaf: leaf)
                     }
-                    if landing.count > 14 {
-                        Text("and \(landing.count - 14) more").font(.system(size: 11.5)).foregroundStyle(T.label3)
+                    if hidden > 0 {
+                        Text("and \(hidden.formatted()) more").font(.system(size: 11.5)).foregroundStyle(T.label3)
                             .padding(.leading, 16).padding(.vertical, 3)
                     }
+                    if let reports { TreeLeaf(leaf: reports) }
                 }
                 .padding(.leading, 20)
                 .overlay(alignment: .leading) {
@@ -339,6 +377,18 @@ struct DestDraftRow: View {
         .padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.02)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(T.sep, lineWidth: 1))
+    }
+
+    /// The lines to draw: a few of what's copied (any name clashes always shown, up to 14), how many more,
+    /// and the reports folder last, never pushed off the end by a long list.
+    private var preview: (shown: [TreeLeaf.Leaf], hidden: Int, reports: TreeLeaf.Leaf?) {
+        var all = landing
+        let reports = all.popLast()
+        let limit = all.count > Composer.foldAfter ? 3 : 14
+        let clashes = all.filter { $0.clash != nil }
+        var shown = Array(all.filter { $0.clash == nil }.prefix(limit))
+        if !clashes.isEmpty { shown = Array((Array(shown.prefix(3)) + clashes).prefix(14)) }
+        return (shown, all.count - shown.count, reports)
     }
 
     /// What will be created in this folder, in order: each thing copied (with its new name if its own is

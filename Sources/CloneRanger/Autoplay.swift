@@ -13,13 +13,19 @@ enum Autoplay {
             let parts = spec.split(separator: "|").map { URL(fileURLWithPath: String($0)) }
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(1))
-                model.setSource(parts[0])
+                // Test: CR_PREFILL_FILES=1 drops everything inside <source> at once (like 600 photos selected in the Finder).
+                if env["CR_PREFILL_FILES"] != nil {
+                    let all = (try? FileManager.default.contentsOfDirectory(at: parts[0], includingPropertiesForKeys: nil)) ?? []
+                    model.setSources(all.filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { $0.path < $1.path })
+                } else {
+                    model.setSource(parts[0])
+                }
                 // Test: CR_PREFILL_ADD="<path>|<path>…" drops more onto "copy from", one drop at a time.
+                for d in parts.dropFirst() { model.addDestination(d) }
                 for extra in (env["CR_PREFILL_ADD"] ?? "").split(separator: "|") {
                     while model.draftScanning { try? await Task.sleep(for: .milliseconds(100)) }
                     model.addSources([URL(fileURLWithPath: String(extra))])
                 }
-                for d in parts.dropFirst() { model.addDestination(d) }
                 if let dir = env["CR_SNAP_DIR"].map({ URL(fileURLWithPath: $0) }) {
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                     while model.draftScanning || model.draftScan == nil { try? await Task.sleep(for: .milliseconds(100)) }
@@ -67,7 +73,13 @@ enum Autoplay {
             if let items = env["CR_AUTOPLAY_ITEMS"] {
                 model.setSources(items.split(separator: "|").map { parts[0].appendingPathComponent(String($0)) })
             } else {
-                model.setSource(parts[0])
+                // Test: CR_PREFILL_FILES=1 drops everything inside <source> at once (like 600 photos selected in the Finder).
+                if env["CR_PREFILL_FILES"] != nil {
+                    let all = (try? FileManager.default.contentsOfDirectory(at: parts[0], includingPropertiesForKeys: nil)) ?? []
+                    model.setSources(all.filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { $0.path < $1.path })
+                } else {
+                    model.setSource(parts[0])
+                }
             }
             for d in parts.dropFirst() { model.addDestination(d) }
             while model.draftScan == nil { try? await Task.sleep(for: .milliseconds(100)) }

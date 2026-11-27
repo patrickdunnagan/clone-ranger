@@ -368,7 +368,14 @@ final class AppModel: ObservableObject {
             notice = "\(stranger.lastPathComponent) is from a different place (\(Fmt.place(stranger.deletingLastPathComponent()))). One place per transfer: start this one, then set that one up next."
             return
         }
-        let new = urls.map { Plan.exactName($0) }.filter { n in !items.contains(n) }
+        var seen = Set(items)
+        let new = urls.map { Plan.exactName($0) }.filter { seen.insert($0).inserted }
+        // Dropped twice by mistake: say so, so nobody wonders whether things are on the list twice.
+        let already = urls.count - new.count
+        let twiceNote: String? = already == 0 ? nil
+            : new.isEmpty ? "\(already == 1 ? "That's" : "All \(already) of those are") already on the list, so nothing was added."
+            : "\(Fmt.count(new.count, "item")) added. \(already) of the \(urls.count) you dropped \(already == 1 ? "was" : "were") already on the list, so \(already == 1 ? "it wasn't" : "they weren't") added twice."
+        defer { if twiceNote != nil { notice = twiceNote } }
         guard !new.isEmpty else { return }
         if draftItems != nil, let old = draftScan, !draftScanning {
             // Only the new ones need counting.
